@@ -1,0 +1,86 @@
+[package]
+name = "dev_couple_dem_cfd"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/SueHeir/dev_couple_dem_cfd"
+description = "Cross-substrate coupling: granular DEM (soil particles / dirt bonded clumps) <-> compressible CFD (dev_field_efvm) via grass_multi"
+publish = false
+
+# Own workspace root so cargo does not walk up into the sibling tier workspaces.
+[workspace]
+
+[[example]]
+name = "settling_sphere"
+path = "examples/settling_sphere/main.rs"
+
+[[example]]
+name = "fixed_bed_ergun"
+path = "examples/fixed_bed_ergun/main.rs"
+
+[[example]]
+name = "fluidized_bed_umf"
+path = "examples/fluidized_bed_umf/main.rs"
+
+[[example]]
+name = "cfd_ibm_fiber"
+path = "examples/cfd_ibm_fiber/main.rs"
+
+# ---------------------------------------------------------------------------
+# This repo is a COUPLING: it depends on BOTH partner tiers and joins their
+# sub-Apps through grass_multi. The hard constraint is that every crate must
+# resolve grass/soil/field to ONE shared source, so the DEM (SOIL/dirt) sub-App
+# and the CFD (FIELD) sub-App share exactly one `grass_app::App` /
+# `soil_core::Atom` type across the seam. We do that the same way dev_field_efvm
+# did while these examples lived inside it: sibling PATH deps for the shared
+# substrates, and a [patch] that redirects the DEM tiers' git deps on grass/soil
+# to those same paths. All partner repos are sibling checkouts under ~/projects,
+# exactly as the fleet lays them out.
+# ---------------------------------------------------------------------------
+[dependencies]
+# CFD side (dev_field_efvm) — path-dep its physics crates.
+cfd_eos      = { path = "../dev_field_efvm/crates/cfd_eos" }
+cfd_ibm      = { path = "../dev_field_efvm/crates/cfd_ibm" }
+cfd_solver   = { path = "../dev_field_efvm/crates/cfd_solver" }
+cfd_state    = { path = "../dev_field_efvm/crates/cfd_state" }
+cfd_boundary = { path = "../dev_field_efvm/crates/cfd_boundary" }
+
+# DEM side (SOIL particles) — path-dep the substrate + Verlet integrator.
+soil_core   = { path = "../soil/crates/soil_core", default-features = false, features = ["precision-double"] }
+soil_verlet = { path = "../soil/crates/soil_verlet", default-features = false, features = ["precision-double"] }
+
+# DEM side (dirt bonded-particle model) — the `cfd_ibm_fiber` example builds its
+# immersed body as a BPM bonded-sphere chain, so the fiber crossing the DEM->CFD
+# seam is a genuine bonded clump, not an ad-hoc line of spheres.
+dirt_bond = { path = "../dirt/crates/dirt_bond", default-features = false, features = ["precision-double"] }
+dirt_atom = { path = "../dirt/crates/dirt_atom", default-features = false, features = ["precision-double"] }
+
+# Shared substrates + framework (the single source everything must agree on).
+field_core      = { path = "../field/crates/field_core" }
+grass_app       = { path = "../grass/crates/grass_app" }
+grass_io        = { path = "../grass/crates/grass_io" }
+grass_multi     = { path = "../grass/crates/grass_multi" }
+grass_scheduler = { path = "../grass/crates/grass_scheduler" }
+
+serde = { version = "1", features = ["derive"] }
+
+[profile.release]
+opt-level = 3
+
+# Redirect the DEM tiers' git deps on grass/soil to the sibling path checkouts,
+# so there is exactly ONE grass/soil across the coupled sub-Apps. Both `soil_*`
+# and `dirt_*` pin grass/soil by these Gitea URLs; the patch unifies them.
+[patch."ssh://git@192.168.0.170:2222/SueHeir/grass.git"]
+grass_app       = { path = "../grass/crates/grass_app" }
+grass_scheduler = { path = "../grass/crates/grass_scheduler" }
+grass_mpi       = { path = "../grass/crates/grass_mpi" }
+grass_derive    = { path = "../grass/crates/grass_derive" }
+grass_io        = { path = "../grass/crates/grass_io" }
+grass_multi     = { path = "../grass/crates/grass_multi" }
+
+[patch."ssh://git@192.168.0.170:2222/SueHeir/soil.git"]
+soil_core   = { path = "../soil/crates/soil_core" }
+soil_derive = { path = "../soil/crates/soil_derive" }
+soil_verlet = { path = "../soil/crates/soil_verlet" }
+soil_print  = { path = "../soil/crates/soil_print" }
+soil_deform = { path = "../soil/crates/soil_deform" }

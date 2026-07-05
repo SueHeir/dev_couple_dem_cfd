@@ -1,0 +1,32 @@
+[set]
+name = "dev_couple_dem_cfd-validation"
+tier = "dev_couple_dem_cfd"
+description = "Skeptic-facing validation gates for the DEM<->CFD interphase-drag coupling. Each gate checks the live seam against a literature reference with an independent closure + a negative control. `mode`: smoke = fast (run every push/PR); full = heavier bed/fiber gates (scheduled / on demand via `run.sh full`)."
+
+[[validation]]
+id = "settling_sphere_stokes"
+mode = "smoke"
+kind = "cargo-example"
+command = "cargo run --release --example settling_sphere -- examples/settling_sphere/config.toml"
+reference = "Stokes (1851) terminal velocity, low-Reynolds settling sphere through the Wen-Yu/Gidaspow drag seam. v_t 0.0662 vs 0.0681 m/s (2.78%)."
+
+[[validation]]
+id = "fixed_bed_ergun"
+mode = "full"
+kind = "cargo-example"
+command = "cargo run --release --example fixed_bed_ergun -- examples/fixed_bed_ergun/config.toml"
+reference = "Ergun (1952) packed-bed pressure drop over Re_p in [1.1, 444], independent MacDonald (1979) closure, corrupted-seam negative control. rel.err 5.63-19.78% (tol 25%)."
+
+[[validation]]
+id = "fluidized_bed_umf"
+mode = "full"
+kind = "cargo-example"
+command = "cargo run --release --example fluidized_bed_umf -- examples/fluidized_bed_umf/config.toml"
+reference = "Wen & Yu (1966) minimum fluidization velocity via live net-force bisection, with omit-grad-P and eps-power negative controls. U_mf 0.5138 vs 0.5380 m/s (4.51%, tol 15%)."
+
+[[validation]]
+id = "cfd_ibm_fiber"
+mode = "full"
+kind = "cargo-example"
+command = "cargo run --release --example cfd_ibm_fiber -- examples/cfd_ibm_fiber/config.toml"
+reference = "Resolved DIRT bonded-sphere fiber immersed via ghost-cell IBM: Archimedes buoyancy (1.21%) + Tirado slender-body drag anisotropy r_low 1.3098 vs 1.2772 (2.55%, tol 8%), isotropic control rejected."
