@@ -1,0 +1,21 @@
+[package]
+name = "dem_cfd"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/SueHeir/dev_couple_dem_cfd"
+description = "Reusable unresolved (Euler-Lagrange) DEM<->CFD coupling layer on GRASS: config blocks, void-fraction drag closures, cell-binning/deposition, the two-sub-App grass_multi seam scaffold, and analytical references. The pieces every unresolved DEM<->CFD simulation repeats."
+
+[dependencies]
+cfd_eos.workspace = true
+cfd_ibm.workspace = true
+cfd_solver.workspace = true
+cfd_state.workspace = true
+field_core.workspace = true
+grass_app.workspace = true
+grass_io.workspace = true
+grass_multi.workspace = true
+grass_scheduler.workspace = true
+soil_core.workspace = true
+soil_verlet.workspace = true
+serde.workspace = true

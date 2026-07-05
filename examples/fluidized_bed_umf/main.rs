@@ -89,6 +89,13 @@
 //!     examples/fluidized_bed_umf/config.toml
 //! ```
 //!
+//! The shared unresolved DEM↔CFD machinery — the `[gas]`/`[particle]`/`[mesh]`/
+//! `[packing]` config blocks, the MacDonald/Ergun β closures and [`SeamMode`], the
+//! Wen&Yu/Archimedes references, void-fraction deposition, the interstitial-flow /
+//! momentum-sink plumbing, and the `grass_multi` two-way seam scaffold — lives in
+//! the `dem_cfd` crate. What remains here is this case's *force model* (drag + ∇P +
+//! buoyancy), its dynamic `U_mf` measurement, and its validation gates.
+//!
 //! References:
 //! * C.Y. Wen & Y.H. Yu, "A generalized method for predicting the minimum
 //!   fluidization velocity", *AIChE J.* 12(3):610–612 (1966).
@@ -98,76 +105,19 @@
 //! * C. Goniva et al., "Influence of rolling friction on single spout fluidized bed
 //!   simulation", *Particuology* 10(5):582–591 (2012) — CFDEM CFD–DEM validation.
 
-use std::any::TypeId;
-
-use cfd_eos::{Eos, EosResource, IdealGas, Viscosity};
-use cfd_ibm::coupling::{
-    self, drag_force_from_beta, InterphaseForces, ParticleKinematics, ParticleSet,
-};
-use cfd_solver::{CfdStatePlugin, IdealGasPlugin};
-use cfd_state::{CfdState, PrimVar};
-use field_core::{
-    FieldDefaultPlugins, FieldRegistry, FvMesh, MeshScheduleSet, StructuredMesh, UniformMesh,
-    UniformMeshConfig, Vec3,
-};
+use cfd_eos::{Eos, EosResource};
+use cfd_ibm::coupling::{self, drag_force_from_beta, InterphaseForces, ParticleSet};
+use cfd_state::CfdState;
+use field_core::{FieldRegistry, FvMesh, MeshScheduleSet, UniformMesh, Vec3};
 use grass_app::prelude::*;
 use grass_io::Config;
-use grass_multi::{tick_subapp, Multi, MultiAppExt, SubApps};
-use grass_scheduler::prelude::*;
 use grass_scheduler::{Res, ResMut};
 use serde::Deserialize;
-use soil_core::{Atom, ParticleSimScheduleSet};
-use soil_verlet::VelocityVerletPlugin;
+use soil_core::Atom;
 
-const R_GAS: f64 = 287.058; // matches IdealGas::air()
+use dem_cfd::prelude::*;
 
-// ─── Declarative case ────────────────────────────────────────────────────────
-
-#[derive(Deserialize, Default)]
-struct GasCfg {
-    rho: f64,
-    p: f64,
-    /// Dynamic viscosity μ [Pa·s].
-    mu: f64,
-}
-
-#[derive(Deserialize, Default)]
-struct ParticleCfg {
-    /// Bead diameter d [m].
-    diameter: f64,
-    density: f64,
-}
-
-/// FCC packing, identical construction to `fixed_bed_ergun`: `nc*` conventional
-/// cells (4 spheres each), lattice constant set so the solid fraction equals
-/// `solid_fraction` (bed porosity ε = 1 − solid_fraction), non-overlapping.
-#[derive(Deserialize, Default)]
-struct PackingCfg {
-    ncx: usize,
-    ncy: usize,
-    ncz: usize,
-    /// Target solid volume fraction φ = 1 − ε (must be ≤ 0.74, the FCC max).
-    solid_fraction: f64,
-}
-
-/// Gas mesh — **coarser than the particles** (unresolved regime). `nx*` must divide
-/// the packing's conventional-cell counts so the domain tiles evenly.
-#[derive(Deserialize, Default)]
-struct MeshCfg {
-    nx: usize,
-    ny: usize,
-    nz: usize,
-    #[serde(default = "default_ng")]
-    ng: usize,
-}
-fn default_ng() -> usize {
-    2
-}
-
-#[derive(Deserialize, Default)]
-struct GravityCfg {
-    gz: f64,
-}
+// ─── Case-specific config (the shared blocks come from dem_cfd::config) ───────
 
 #[derive(Deserialize, Default)]
 struct FlowCfg {
@@ -201,164 +151,6 @@ struct ValidationCfg {
     tol_deposit_cell: f64,
 }
 
-// ─── Independent packed-bed closures ─────────────────────────────────────────
-
-/// MacDonald et al. (1979) interphase coefficient β (the "Ergun revisited" 180/1.8
-/// re-fit) — the INDEPENDENT measured closure (shares no constant with Wen & Yu).
-fn macdonald_beta(eps: f64, rho_f: f64, mu: f64, d: f64, rel_speed: f64) -> f64 {
-    let eps = eps.clamp(1e-6, 1.0);
-    let om = 1.0 - eps;
-    180.0 * om * om * mu / (eps * d * d) + 1.8 * om * rho_f * rel_speed / d
-}
-
-/// Ergun (1952) β (150/1.75) — reported only for the exact-Ergun crossover that
-/// brackets Wen & Yu; never the measured validation closure (that would share the
-/// reference's constants).
-fn ergun_beta(eps: f64, rho_f: f64, mu: f64, d: f64, rel_speed: f64) -> f64 {
-    let eps = eps.clamp(1e-6, 1.0);
-    let om = 1.0 - eps;
-    150.0 * om * om * mu / (eps * d * d) + 1.75 * om * rho_f * rel_speed / d
-}
-
-/// Which β closure the seam assembles, and whether to inject a fault (negative
-/// controls). Set by the parent per pass.
-#[derive(Clone, Copy)]
-struct SeamMode {
-    /// `true` → MacDonald(1979) measured closure; `false` → Ergun(1952) constants
-    /// (used only for the reported bracket, never the pass gate).
-    macdonald: bool,
-    /// Negative control A: drop the ∇P (pressure-gradient buoyancy) force — a real
-    /// CFD–DEM mistake that shifts U_mf by ~1/ε.
-    omit_pressure_grad: bool,
-    /// Negative control B: the fixed-bed's ε²-instead-of-ε³ reduction bug (scale
-    /// the assembled force by 1/ε).
-    corrupt_eps_power: bool,
-}
-impl Default for SeamMode {
-    fn default() -> Self {
-        Self { macdonald: true, omit_pressure_grad: false, corrupt_eps_power: false }
-    }
-}
-
-fn beta_for(mode: SeamMode, eps: f64, rho_f: f64, mu: f64, d: f64, rel_speed: f64) -> f64 {
-    if mode.macdonald {
-        macdonald_beta(eps, rho_f, mu, d, rel_speed)
-    } else {
-        ergun_beta(eps, rho_f, mu, d, rel_speed)
-    }
-}
-
-// ─── Wen & Yu (1966) reference + exact-Ergun bracket ─────────────────────────
-
-/// Archimedes number `Ar = ρ_f (ρ_p − ρ_f) g d³ / μ²`.
-fn archimedes(rho_f: f64, rho_p: f64, g: f64, d: f64, mu: f64) -> f64 {
-    rho_f * (rho_p - rho_f) * g.abs() * d.powi(3) / (mu * mu)
-}
-
-/// Wen & Yu (1966) minimum fluidization velocity: `Re_mf = sqrt(33.7² + 0.0408 Ar) − 33.7`.
-fn u_mf_wen_yu(rho_f: f64, rho_p: f64, g: f64, d: f64, mu: f64) -> f64 {
-    let ar = archimedes(rho_f, rho_p, g, d, mu);
-    let re_mf = (33.7f64 * 33.7 + 0.0408 * ar).sqrt() - 33.7;
-    re_mf * mu / (rho_f * d)
-}
-
-/// Superficial velocity at which a packed-bed pressure drop (`C1` viscous, `C2`
-/// inertial constants, porosity `eps`) equals the buoyant weight per unit length
-/// `(1−ε)(ρ_p−ρ_f)g` — the incipient-fluidization criterion. Closed form of the
-/// Ergun/MacDonald quadratic `a_inert U² + a_visc U − target = 0`. Used for the
-/// analytic Ergun/MacDonald brackets reported alongside the SEAM-measured U_mf.
-#[allow(clippy::too_many_arguments)]
-fn u_mf_balance(c1: f64, c2: f64, eps: f64, rho_f: f64, rho_p: f64, g: f64, d: f64, mu: f64) -> f64 {
-    let om = 1.0 - eps;
-    let e3 = eps.powi(3);
-    let a_visc = c1 * om / e3 * mu / (d * d); // × U
-    let a_inert = c2 / e3 * rho_f / d; // × U²
-    let target = (rho_p - rho_f) * g.abs(); // (dP/L)/(1−ε) at balance
-    (-a_visc + (a_visc * a_visc + 4.0 * a_inert * target).sqrt()) / (2.0 * a_inert)
-}
-
-// ─── Bed-scale void-fraction deposition (containment binning) ────────────────
-// Mirrors `fixed_bed_ergun`'s helper: the seam's own interpolation locator is
-// tuned for a single SUB-CELL particle and mis-bins at bed scale, so bed-scale
-// containment binning lives in the example (library-placement rule — one-off to
-// the packed-bed cases).
-
-fn axis_centers(mesh: &UniformMesh) -> ([Vec<f64>; 3], usize) {
-    let [ni, nj, nk] = mesh.dims();
-    let ng = mesh.n_ghost();
-    let xc = (0..ni).map(|i| mesh.cell_centroid(mesh.idx_raw(i + ng, ng, ng))[0]).collect();
-    let yc = (0..nj).map(|j| mesh.cell_centroid(mesh.idx_raw(ng, j + ng, ng))[1]).collect();
-    let zc = (0..nk).map(|k| mesh.cell_centroid(mesh.idx_raw(ng, ng, k + ng))[2]).collect();
-    ([xc, yc, zc], ng)
-}
-#[inline]
-fn nearest_center(cs: &[f64], v: f64) -> usize {
-    if cs.len() < 2 {
-        return 0;
-    }
-    let dx = cs[1] - cs[0];
-    (((v - cs[0]) / dx).round() as isize).clamp(0, cs.len() as isize - 1) as usize
-}
-fn containing_cell(mesh: &UniformMesh, centers: &[Vec<f64>; 3], ng: usize, p: Vec3) -> usize {
-    let i = nearest_center(&centers[0], p[0]);
-    let j = nearest_center(&centers[1], p[1]);
-    let k = nearest_center(&centers[2], p[2]);
-    mesh.idx_raw(i + ng, j + ng, k + ng)
-}
-/// Per-cell void fraction `ε = 1 − ΣV_p/V_cell` by containment deposition, plus the
-/// per-particle containing-cell index (reused to drive the drag).
-fn deposit_bed_void_fraction(
-    mesh: &UniformMesh,
-    particles: &[ParticleKinematics],
-) -> (Vec<f64>, Vec<usize>) {
-    let (centers, ng) = axis_centers(mesh);
-    let total = mesh.n_cells_total();
-    let mut solid = vec![0.0f64; total];
-    let mut cell_of_particle = Vec::with_capacity(particles.len());
-    for p in particles {
-        let c = containing_cell(mesh, &centers, ng, p.center);
-        solid[c] += p.volume();
-        cell_of_particle.push(c);
-    }
-    let mut eps = vec![1.0f64; total];
-    for c in 0..total {
-        let v = mesh.cell_volume(c);
-        if v > 0.0 {
-            eps[c] = (1.0 - solid[c] / v).clamp(1e-6, 1.0);
-        }
-    }
-    (eps, cell_of_particle)
-}
-
-// ─── Seam resources shared across the namespace boundary ─────────────────────
-
-/// Per-particle total fluid force (drag + ∇P buoyancy + hydrostatic), FIELD→SOIL.
-#[derive(Clone, Debug, Default)]
-struct FluidForces {
-    f: Vec<Vec3>,
-}
-/// Gravity applied to the bed atoms (SOIL side).
-#[derive(Clone, Copy)]
-struct BodyAccel {
-    g: Vec3,
-}
-/// Imposed superficial velocity for the current sweep point (world axes).
-#[derive(Clone, Copy, Default)]
-struct Superficial {
-    u: Vec3,
-}
-/// Static seam context on the FIELD sub-App.
-#[derive(Clone, Copy)]
-struct SeamCtx {
-    mu: f64,
-    rho: f64,
-    /// Bed porosity ε used for the superficial↔interstitial conversion `u_g = U/ε`.
-    eps: f64,
-    /// Gravity (for the hydrostatic buoyancy term).
-    g: Vec3,
-    dt: f64,
-    mode: SeamMode,
-}
 /// Read back by the parent each coupled step.
 #[derive(Clone, Copy, Default)]
 struct BedResult {
@@ -372,6 +164,11 @@ struct BedResult {
 }
 
 // ─── FIELD sub-App: impose the flow, run the seam, deliver per-particle force ─
+//
+// The plumbing (impose the interstitial velocity, deposit the void fraction, the
+// momentum sink + conservation check) comes from `dem_cfd::bed`; what is written
+// out longhand here is this case's FORCE MODEL — drag + the ∇P (pressure-gradient
+// buoyancy) force + hydrostatic buoyancy — and the two negative-control faults.
 
 #[allow(clippy::too_many_arguments)]
 fn fluidized_seam_system(
@@ -393,18 +190,10 @@ fn fluidized_seam_system(
     // Impose the interstitial gas velocity u_g = U/ε_bed in every interior cell.
     let inv_eps = 1.0 / ctx.eps;
     let u_g = [sup.u[0] * inv_eps, sup.u[1] * inv_eps, sup.u[2] * inv_eps];
-    for c in 0..mesh.n_cells_total() {
-        if !mesh.is_local_cell(c) {
-            continue;
-        }
-        let rho = state.u[c].rho;
-        state.u[c].rho_u = rho * u_g[0];
-        state.u[c].rho_v = rho * u_g[1];
-        state.u[c].rho_w = rho * u_g[2];
-    }
+    impose_interstitial_velocity(&mesh, &mut state, u_g);
 
     // Deposit the packing's void fraction (drives the drag) and report fidelity.
-    let (eps_field, cell_of_particle) = deposit_bed_void_fraction(&*mesh, parts);
+    let (eps_field, cell_of_particle) = deposit_bed_void_fraction(&mesh, parts);
     let mut e_err = 0.0f64;
     for (c, &e) in eps_field.iter().enumerate() {
         if !mesh.is_local_cell(c) || e >= 1.0 - 1e-9 {
@@ -474,179 +263,22 @@ fn fluidized_seam_system(
     result.f_fluid_total = f_fluid;
 
     // Two-way momentum sink (reaction of the DRAG part) + conservation check.
-    let mut m0 = [0.0f64; 3];
-    for c in 0..mesh.n_cells_total() {
-        if mesh.is_local_cell(c) {
-            let v = mesh.cell_volume(c);
-            m0[0] += state.u[c].rho_u * v;
-            m0[1] += state.u[c].rho_v * v;
-            m0[2] += state.u[c].rho_w * v;
-        }
-    }
-    coupling::apply_momentum_sink(&*mesh, &mut state, parts, &drag_on_particle, ctx.dt);
-    let mut m1 = [0.0f64; 3];
-    for c in 0..mesh.n_cells_total() {
-        if mesh.is_local_cell(c) {
-            let v = mesh.cell_volume(c);
-            m1[0] += state.u[c].rho_u * v;
-            m1[1] += state.u[c].rho_v * v;
-            m1[2] += state.u[c].rho_w * v;
-        }
-    }
-    let (mut dn, mut sc) = (0.0f64, 0.0f64);
-    for k in 0..3 {
-        let dm = m1[k] - m0[k];
-        let imp = -drag_on_particle.iter().map(|f| f[k]).sum::<f64>() * ctx.dt;
-        dn += (dm - imp) * (dm - imp);
-        sc += imp * imp;
-    }
-    result.mom_err = dn.sqrt() / sc.sqrt().max(1e-30);
+    result.mom_err = momentum_sink_and_check(&mesh, &mut state, parts, &drag_on_particle, ctx.dt);
 }
 
-fn build_cfd(gc: &GasCfg, mesh_cfg: UniformMeshConfig, eps: f64, gz: f64, dt: f64) -> App {
-    let (rho, p) = (gc.rho, gc.p);
-    let t = p / (rho * R_GAS);
-    let init = move |_x: Vec3| {
-        let eos = IdealGas::air();
-        eos.prim_to_cons(&PrimVar::new(rho, 0.0, 0.0, 0.0, p, t))
-    };
-    let mut app = App::new();
-    app.add_plugins(FieldDefaultPlugins { mesh: mesh_cfg })
-        .add_plugins(CfdStatePlugin::new(init))
-        .add_plugins(IdealGasPlugin);
-    app.add_resource(Viscosity::Constant(gc.mu));
-    app.add_resource(SeamCtx {
-        mu: gc.mu,
-        rho: gc.rho,
+fn build_cfd(gas: &GasCfg, mesh_cfg: field_core::UniformMeshConfig, eps: f64, gz: f64, dt: f64) -> App {
+    let ctx = SeamCtx {
+        mu: gas.mu,
+        rho: gas.rho,
         eps,
         g: [0.0, 0.0, gz],
         dt,
         mode: SeamMode::default(),
-    });
-    app.add_resource(Superficial::default());
-    app.add_resource(ParticleSet::default());
-    app.add_resource(InterphaseForces::default());
+    };
+    let mut app = build_cfd_base(gas, mesh_cfg, ctx);
     app.add_resource(BedResult::default());
     app.add_update_system(fluidized_seam_system, MeshScheduleSet::Output);
     app
-}
-
-// ─── SOIL sub-App: the freely-moving bed ─────────────────────────────────────
-
-/// `Force` phase: force = gravity + the per-particle fluid load from the seam.
-fn bed_force(mut atoms: ResMut<Atom>, ff: Res<FluidForces>, body: Res<BodyAccel>) {
-    let n = atoms.nlocal as usize;
-    for i in 0..n {
-        let m = atoms.mass[i] as f64;
-        let f = ff.f.get(i).copied().unwrap_or([0.0; 3]);
-        atoms.force[i] = [
-            (m * body.g[0] + f[0]) as _,
-            (m * body.g[1] + f[1]) as _,
-            (m * body.g[2] + f[2]) as _,
-        ];
-    }
-}
-
-fn build_soil(positions: &[[f64; 3]], radius: f64, density: f64, gz: f64, dt: f64) -> App {
-    let mut atoms = Atom::new();
-    atoms.dt = dt;
-    let mass = density * 4.0 / 3.0 * std::f64::consts::PI * radius.powi(3);
-    for (tag, pos) in positions.iter().enumerate() {
-        atoms.push_test_atom(tag as u32, *pos, radius, mass);
-    }
-    atoms.nlocal = positions.len() as u32;
-    atoms.natoms = positions.len() as u64;
-
-    let mut app = App::new();
-    app.add_resource(atoms);
-    app.add_resource(FluidForces::default());
-    app.add_resource(BodyAccel { g: [0.0, 0.0, gz] });
-    app.add_update_system(bed_force, ParticleSimScheduleSet::Force);
-    app.add_plugins(VelocityVerletPlugin::new());
-    app
-}
-
-/// FCC sphere centers filling `[0,Lx]×[0,Ly]×[0,Lz]` (identical to `fixed_bed_ergun`).
-fn fcc_packing(nc: [usize; 3], a: f64) -> (Vec<[f64; 3]>, [f64; 3]) {
-    let s = 0.25;
-    let basis = [
-        [s, s, s],
-        [s, 0.5 + s, 0.5 + s],
-        [0.5 + s, s, 0.5 + s],
-        [0.5 + s, 0.5 + s, s],
-    ];
-    let mut pos = Vec::with_capacity(4 * nc[0] * nc[1] * nc[2]);
-    for i in 0..nc[0] {
-        for j in 0..nc[1] {
-            for k in 0..nc[2] {
-                for b in &basis {
-                    pos.push([
-                        (i as f64 + b[0]) * a,
-                        (j as f64 + b[1]) * a,
-                        (k as f64 + b[2]) * a,
-                    ]);
-                }
-            }
-        }
-    }
-    let bounds = [nc[0] as f64 * a, nc[1] as f64 * a, nc[2] as f64 * a];
-    (pos, bounds)
-}
-
-// ─── Parent coupling schedule ────────────────────────────────────────────────
-
-#[derive(Debug, Clone, Copy)]
-enum Phase {
-    Export,
-    TickCfd,
-    Import,
-    TickSoil,
-}
-impl ScheduleSet for Phase {
-    fn to_index(&self) -> u32 {
-        match self {
-            Self::Export => 0,
-            Self::TickCfd => 1,
-            Self::Import => 2,
-            Self::TickSoil => 3,
-        }
-    }
-    fn name(&self) -> &'static str {
-        match self {
-            Self::Export => "Export",
-            Self::TickCfd => "TickCfd",
-            Self::Import => "Import",
-            Self::TickSoil => "TickSoil",
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-struct ParticleSpec {
-    radius: f64,
-}
-
-/// SOIL→FIELD: hand the (moving) bed kinematics across.
-fn export_kinematics(world: Multi, spec: Res<ParticleSpec>) {
-    let atoms = world.expect_read::<Atom>("soil");
-    let n = atoms.nlocal as usize;
-    let mut set = world.expect_write::<ParticleSet>("cfd");
-    set.particles.clear();
-    for i in 0..n {
-        set.particles.push(ParticleKinematics {
-            center: [atoms.pos[i][0] as f64, atoms.pos[i][1] as f64, atoms.pos[i][2] as f64],
-            velocity: [atoms.vel[i][0] as f64, atoms.vel[i][1] as f64, atoms.vel[i][2] as f64],
-            radius: spec.radius,
-        });
-    }
-}
-
-/// FIELD→SOIL: copy the per-particle total fluid force to the bed.
-fn import_force(world: Multi) {
-    let forces = world.expect_read::<InterphaseForces>("cfd");
-    let v = forces.force.clone();
-    drop(forces);
-    world.expect_write::<FluidForces>("soil").f = v;
 }
 
 fn main() {
@@ -678,7 +310,7 @@ fn main() {
         "mesh {}x{}x{} must divide packing {}x{}x{} evenly",
         meshc.nx, meshc.ny, meshc.nz, pack.ncx, pack.ncy, pack.ncz
     );
-    let a = d * (2.0 * std::f64::consts::PI / (3.0 * pack.solid_fraction)).cbrt();
+    let a = fcc_lattice_constant(d, pack.solid_fraction);
     let (positions, bounds) = fcc_packing([pack.ncx, pack.ncy, pack.ncz], a);
     let n = positions.len();
     let v_bed = bounds[0] * bounds[1] * bounds[2];
@@ -696,30 +328,13 @@ fn main() {
     let u_mac = u_mf_balance(180.0, 1.8, eps, gas.rho, pc.density, g, d, gas.mu);
     let re_wy = gas.rho * u_wy * d / gas.mu;
 
-    let mesh_cfg = UniformMeshConfig {
-        nx: meshc.nx,
-        ny: meshc.ny,
-        nz: meshc.nz,
-        ng: meshc.ng,
-        bounds_lo: [0.0, 0.0, 0.0],
-        bounds_hi: bounds,
-        y_edges: None,
-        z_edges: None,
-    };
+    let mesh_cfg = meshc.to_uniform(bounds);
     let n_cells = (meshc.nx * meshc.ny * meshc.nz) as f64;
     let dx = (v_bed / n_cells).cbrt();
 
-    let soil = build_soil(&positions, radius, pc.density, grav.gz, flow.dt);
+    let soil = build_soil_bed(&positions, radius, pc.density, grav.gz, flow.dt);
     let cfd = build_cfd(&gas, mesh_cfg, eps, grav.gz, flow.dt);
-    let mut parent = App::new();
-    parent.add_subapp("soil", soil);
-    parent.add_subapp("cfd", cfd);
-    parent.add_resource(ParticleSpec { radius });
-    parent.add_update_system(export_kinematics, Phase::Export);
-    parent.add_update_system(tick_subapp("cfd", 1), Phase::TickCfd);
-    parent.add_update_system(import_force, Phase::Import);
-    parent.add_update_system(tick_subapp("soil", 1), Phase::TickSoil);
-    parent.prepare();
+    let mut parent = couple_two_way(soil, cfd, radius);
 
     println!("# Minimum fluidization velocity U_mf — DYNAMIC unresolved DEM-CFD seam");
     println!("# MEASURED drag: INDEPENDENT MacDonald et al. (1979) closure (180/1.8), assembled through the seam");
@@ -918,7 +533,7 @@ fn main() {
     }
 }
 
-// ─── Live-seam helpers (outside any system, via the parent's SubApps) ─────────
+// ─── Live-seam driver helpers (outside any system, via dem_cfd accessors) ─────
 
 /// Step the coupled system once from the current (rest) bed state and record the
 /// seam force. `BedResult` is written by the FIELD seam in the `TickCfd` phase —
@@ -931,49 +546,32 @@ fn export_and_seam(parent: &mut App) {
 
 /// Reset the bed atoms to their initial positions and zero velocity.
 fn reset_bed(parent: &App, positions: &[[f64; 3]]) {
-    let subs = parent.get_resource_ref::<SubApps>().unwrap();
-    let cell = subs.find("soil").unwrap().resource_cell(TypeId::of::<Atom>()).unwrap();
-    let mut b = cell.borrow_mut();
-    let atoms = b.downcast_mut::<Atom>().unwrap();
-    let n = atoms.nlocal as usize;
-    for i in 0..n {
-        atoms.pos[i] = [positions[i][0], positions[i][1], positions[i][2]];
-        atoms.vel[i] = [0.0, 0.0, 0.0];
-        atoms.force[i] = [0.0, 0.0, 0.0];
-    }
-}
-
-fn set_superficial(parent: &App, u: Vec3) {
-    let subs = parent.get_resource_ref::<SubApps>().unwrap();
-    let cell =
-        subs.find("cfd").unwrap().resource_cell(TypeId::of::<Superficial>()).unwrap();
-    cell.borrow_mut().downcast_mut::<Superficial>().unwrap().u = u;
-}
-
-fn set_seam_mode(parent: &App, mode: SeamMode) {
-    let subs = parent.get_resource_ref::<SubApps>().unwrap();
-    let cell = subs.find("cfd").unwrap().resource_cell(TypeId::of::<SeamCtx>()).unwrap();
-    cell.borrow_mut().downcast_mut::<SeamCtx>().unwrap().mode = mode;
+    with_subapp_resource::<Atom>(parent, "soil", |atoms| {
+        let n = atoms.nlocal as usize;
+        for i in 0..n {
+            atoms.pos[i] = [positions[i][0], positions[i][1], positions[i][2]];
+            atoms.vel[i] = [0.0, 0.0, 0.0];
+            atoms.force[i] = [0.0, 0.0, 0.0];
+        }
+    });
 }
 
 /// (Σ total fluid force, Σ drag force, deposition err, momentum err).
 fn read_result(parent: &App) -> (Vec3, Vec3, f64, f64) {
-    let subs = parent.get_resource_ref::<SubApps>().unwrap();
-    let cell = subs.find("cfd").unwrap().resource_cell(TypeId::of::<BedResult>()).unwrap().borrow();
-    let r = cell.downcast_ref::<BedResult>().unwrap();
+    let r = read_subapp_resource::<BedResult>(parent, "cfd");
     (r.f_fluid_total, r.f_drag_total, r.eps_cell_err, r.mom_err)
 }
 
 /// Bed centre-of-mass vertical velocity (uniform-mass bed → mean v_z).
 fn bed_com_vz(parent: &App) -> f64 {
-    let subs = parent.get_resource_ref::<SubApps>().unwrap();
-    let cell = subs.find("soil").unwrap().resource_cell(TypeId::of::<Atom>()).unwrap().borrow();
-    let atoms = cell.downcast_ref::<Atom>().unwrap();
-    let n = atoms.nlocal as usize;
     let mut sum = 0.0f64;
-    for i in 0..n {
-        sum += atoms.vel[i][2] as f64;
-    }
+    let mut n = 0usize;
+    with_subapp_resource::<Atom>(parent, "soil", |atoms| {
+        n = atoms.nlocal as usize;
+        for i in 0..n {
+            sum += atoms.vel[i][2] as f64;
+        }
+    });
     sum / n.max(1) as f64
 }
 

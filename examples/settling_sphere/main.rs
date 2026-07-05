@@ -12,11 +12,17 @@
 //!   Export : soil Atom (pos, vel) ──▶ cfd  ParticleSet          (kinematics)
 //!   TickCfd: cfd computes drag+buoyancy from the local gas, deposits void
 //!            fraction ε and the momentum sink −F_drag back into the gas
-//!   Import : cfd InterphaseForces ──▶ soil FluidForce           (fluid load)
+//!   Import : cfd InterphaseForces ──▶ soil FluidForces          (fluid load)
 //!   TickSoil: soil integrates the particle under gravity + the fluid load
 //! ```
 //!
 //! FIELD is the sole mesh owner; the particle is immersed and never owns a cell.
+//! That four-phase two-way schedule, the SOIL side (the integrated particle + its
+//! `bed_force`), the seam resources, and the `[gas]` config block are the generic
+//! `dem_cfd` scaffold ([`couple_two_way`], [`build_soil_bed`]) — a single settling
+//! particle is just a one-element bed. What is written out here is this case's own
+//! FORCE MODEL: the point-particle Wen–Yu/Gidaspow drag + buoyancy (the bed cases
+//! instead deposit a void fraction and use MacDonald/Ergun).
 //!
 //! ## What is validated (independent references)
 //!
@@ -49,7 +55,7 @@ use std::any::TypeId;
 use cfd_eos::{Eos, EosResource, IdealGas, Viscosity};
 use cfd_ibm::coupling::{
     self, beta_gidaspow, cd_schiller_naumann, deposit_void_fraction, particle_reynolds,
-    terminal_velocity, terminal_velocity_stokes, InterphaseForces, ParticleKinematics, ParticleSet,
+    terminal_velocity, terminal_velocity_stokes, InterphaseForces, ParticleSet,
 };
 use cfd_solver::{CfdStatePlugin, IdealGasPlugin};
 use cfd_state::{CfdState, PrimVar};
@@ -59,24 +65,14 @@ use field_core::{
 };
 use grass_app::prelude::*;
 use grass_io::Config;
-use grass_multi::{tick_subapp, Multi, MultiAppExt, SubApps};
-use grass_scheduler::prelude::*;
+use grass_multi::SubApps;
 use grass_scheduler::{Res, ResMut};
 use serde::Deserialize;
-use soil_core::{Atom, ParticleSimScheduleSet};
-use soil_verlet::VelocityVerletPlugin;
+use soil_core::Atom;
 
-const R_GAS: f64 = 287.058; // matches IdealGas::air()
+use dem_cfd::prelude::*;
 
-// ─── Declarative case ────────────────────────────────────────────────────────
-
-#[derive(Deserialize, Default)]
-struct GasCfg {
-    rho: f64,
-    p: f64,
-    /// Dynamic viscosity μ [Pa·s].
-    mu: f64,
-}
+// ─── Case-specific config (the [gas] block comes from dem_cfd::config) ────────
 
 #[derive(Deserialize, Default)]
 struct ParticleCfg {
@@ -108,32 +104,12 @@ struct ValidationCfg {
     tol_momentum: f64,
 }
 
-// ─── Seam resources shared across the namespace boundary ─────────────────────
-
-/// Total fluid force on the particle for this step (buoyancy + drag), written by
-/// the parent from the CFD side and read by the SOIL force system.
-#[derive(Clone, Copy, Default)]
-struct FluidForce {
-    f: Vec3,
-}
-
-/// Gravity acceleration applied to the particle (SOIL side).
-#[derive(Clone, Copy)]
-struct BodyAccel {
-    g: Vec3,
-}
+// ─── FIELD-side resources (this case's point-particle drag needs its own) ────
 
 /// Gravity vector the CFD side reads to assemble the buoyancy (a fluid force).
 #[derive(Clone, Copy)]
 struct GravityVec {
     g: Vec3,
-}
-
-/// Particle radius, on the parent, so `export` can build [`ParticleKinematics`]
-/// from the bare `Atom` (which carries no DEM radius).
-#[derive(Clone, Copy)]
-struct ParticleSpec {
-    radius: f64,
 }
 
 /// Fixed coupling timestep handed to the CFD side for the momentum-sink integral.
@@ -153,45 +129,14 @@ struct DragImpulse {
     total: Vec3,
 }
 
-// ─── SOIL sub-App: one settling particle ─────────────────────────────────────
-
-/// `Force` phase: force = gravity + the fluid load handed in through the seam. No
-/// `AtomPlugin` (no force-zeroing), so this *assigns* the force (idempotent).
-fn particle_force(mut atoms: ResMut<Atom>, ff: Res<FluidForce>, body: Res<BodyAccel>) {
-    let n = atoms.nlocal as usize;
-    for i in 0..n {
-        let m = atoms.mass[i] as f64;
-        atoms.force[i] = [
-            (m * body.g[0] + ff.f[0]) as _,
-            (m * body.g[1] + ff.f[1]) as _,
-            (m * body.g[2] + ff.f[2]) as _,
-        ];
-    }
-}
-
-fn build_soil(pc: &ParticleCfg, gz: f64, dt: f64) -> App {
-    let mut atoms = Atom::new();
-    atoms.dt = dt;
-    let mass = pc.density * 4.0 / 3.0 * std::f64::consts::PI * pc.radius.powi(3);
-    atoms.push_test_atom(0, [pc.x0, pc.y0, pc.z0], pc.radius, mass);
-    atoms.nlocal = 1;
-    atoms.natoms = 1;
-
-    let mut app = App::new();
-    app.add_resource(atoms);
-    app.add_resource(FluidForce::default());
-    app.add_resource(BodyAccel { g: [0.0, 0.0, gz] });
-    app.add_update_system(particle_force, ParticleSimScheduleSet::Force);
-    app.add_plugins(VelocityVerletPlugin::new());
-    app
-}
-
-// ─── FIELD sub-App: the quiescent gas + drag/void/sink coupling system ───────
+// ─── FIELD sub-App: the quiescent gas + point-particle drag/void/sink system ─
 
 /// `Output` phase on the CFD sub-App: for each immersed particle sample the local
 /// gas, evaluate the Wen–Yu/Gidaspow drag + buoyancy, write it to
 /// [`InterphaseForces`] (read back by the parent), and deposit the equal-and-
-/// opposite momentum sink into the gas. This is the FIELD half of the seam.
+/// opposite momentum sink into the gas. This is this case's FORCE MODEL (the
+/// point-particle sub-cell closure — the bed cases use the void-fraction closures
+/// in `dem_cfd::drag` instead).
 #[allow(clippy::too_many_arguments)]
 fn cfd_interphase_system(
     mesh: Res<UniformMesh>,
@@ -252,8 +197,8 @@ fn cfd_interphase_system(
     coupling::apply_momentum_sink(&*mesh, &mut state, parts, &drag_on_particle, dt.0);
 }
 
-fn build_cfd(gc: &GasCfg, mesh_cfg: UniformMeshConfig, gz: f64, dt: f64) -> App {
-    let (rho, p) = (gc.rho, gc.p);
+fn build_cfd(gas: &GasCfg, mesh_cfg: UniformMeshConfig, gz: f64, dt: f64) -> App {
+    let (rho, p) = (gas.rho, gas.p);
     let t = p / (rho * R_GAS);
     let init = move |_x: Vec3| {
         let eos = IdealGas::air();
@@ -264,8 +209,8 @@ fn build_cfd(gc: &GasCfg, mesh_cfg: UniformMeshConfig, gz: f64, dt: f64) -> App 
     app.add_plugins(FieldDefaultPlugins { mesh: mesh_cfg })
         .add_plugins(CfdStatePlugin::new(init))
         .add_plugins(IdealGasPlugin);
-    app.add_resource(Viscosity::Constant(gc.mu));
-    app.add_resource(GasProps { mu: gc.mu });
+    app.add_resource(Viscosity::Constant(gas.mu));
+    app.add_resource(GasProps { mu: gas.mu });
     app.add_resource(GravityVec { g: [0.0, 0.0, gz] });
     app.add_resource(CouplingDt(dt));
     app.add_resource(ParticleSet::default());
@@ -273,55 +218,6 @@ fn build_cfd(gc: &GasCfg, mesh_cfg: UniformMeshConfig, gz: f64, dt: f64) -> App 
     app.add_resource(DragImpulse::default());
     app.add_update_system(cfd_interphase_system, MeshScheduleSet::Output);
     app
-}
-
-// ─── Parent coupling schedule ────────────────────────────────────────────────
-
-#[derive(Debug, Clone, Copy)]
-enum Phase {
-    Export,
-    TickCfd,
-    Import,
-    TickSoil,
-}
-impl ScheduleSet for Phase {
-    fn to_index(&self) -> u32 {
-        match self {
-            Self::Export => 0,
-            Self::TickCfd => 1,
-            Self::Import => 2,
-            Self::TickSoil => 3,
-        }
-    }
-    fn name(&self) -> &'static str {
-        match self {
-            Self::Export => "Export",
-            Self::TickCfd => "TickCfd",
-            Self::Import => "Import",
-            Self::TickSoil => "TickSoil",
-        }
-    }
-}
-
-fn export_kinematics(world: Multi, spec: Res<ParticleSpec>) {
-    let atoms = world.expect_read::<Atom>("soil");
-    let n = atoms.nlocal as usize;
-    let mut set = world.expect_write::<ParticleSet>("cfd");
-    set.particles.clear();
-    for i in 0..n {
-        set.particles.push(ParticleKinematics {
-            center: [atoms.pos[i][0] as f64, atoms.pos[i][1] as f64, atoms.pos[i][2] as f64],
-            velocity: [atoms.vel[i][0] as f64, atoms.vel[i][1] as f64, atoms.vel[i][2] as f64],
-            radius: spec.radius,
-        });
-    }
-}
-
-fn import_force(world: Multi) {
-    let forces = world.expect_read::<InterphaseForces>("cfd");
-    let f = forces.force.first().copied().unwrap_or([0.0; 3]);
-    drop(forces);
-    world.expect_write::<FluidForce>("soil").f = f;
 }
 
 fn main() {
@@ -345,18 +241,11 @@ fn main() {
     let v_balance = terminal_velocity(pc.density, gas.rho, pc.radius, grav.gz.abs(), gas.mu, cd_schiller_naumann);
     let re_balance = particle_reynolds(gas.rho, v_balance, 2.0 * pc.radius, gas.mu);
 
-    let soil = build_soil(&pc, grav.gz, run.dt);
+    // A single settling particle is a one-element bed: reuse the generic SOIL side
+    // and the four-phase two-way coupling scaffold from dem_cfd.
+    let soil = build_soil_bed(&[[pc.x0, pc.y0, pc.z0]], pc.radius, pc.density, grav.gz, run.dt);
     let cfd = build_cfd(&gas, mesh_cfg, grav.gz, run.dt);
-
-    let mut parent = App::new();
-    parent.add_subapp("soil", soil);
-    parent.add_subapp("cfd", cfd);
-    parent.add_resource(ParticleSpec { radius: pc.radius });
-    parent.add_update_system(export_kinematics, Phase::Export);
-    parent.add_update_system(tick_subapp("cfd", 1), Phase::TickCfd);
-    parent.add_update_system(import_force, Phase::Import);
-    parent.add_update_system(tick_subapp("soil", 1), Phase::TickSoil);
-    parent.prepare();
+    let mut parent = couple_two_way(soil, cfd, pc.radius);
 
     println!("# Single-sphere settling — unresolved DEM-CFD seam (Wen-Yu/Gidaspow drag)");
     println!(

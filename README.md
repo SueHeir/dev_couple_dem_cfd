@@ -30,6 +30,28 @@ interphase drag seam, and they compose two independently-developed tiers. So eac
 coupling gets its own `dev_couple_*` repo, depending on its two partner tiers and
 nothing more. (Its SPH sibling is [dev_couple_sph_cfd](https://github.com/SueHeir/dev_couple_sph_cfd).)
 
+## Structure — a reusable crate + thin examples
+
+The pieces every *unresolved* (Euler–Lagrange, void-fraction) DEM↔CFD simulation
+repeats live in one library crate, so an example `main` reads as its physics, not
+its plumbing:
+
+```
+crates/dem_cfd/          the reusable coupling layer
+  config   [gas]/[particle]/[mesh]/[packing] blocks
+  drag     void-fraction β closures (MacDonald/Ergun) + SeamMode
+  reference Wen&Yu / Ergun / Archimedes (kept out of the measured path)
+  bed      deposit packing → coarse mesh, impose flow, momentum sink, FCC packing
+  seam     grass_multi scaffold: seam resources, CFD base, couple_two_way(), accessors
+examples/<name>/         each keeps only its FORCE MODEL + validation + driver
+```
+
+What a case supplies: its **force model** (the seam system — point-particle drag,
+drag-only, or drag+∇P+buoyancy), its **topology** if non-standard (the static
+packed bed is a two-phase export-once schedule, not the dynamic four-phase one),
+and its **validation** gates. Fully *resolved* IBM couplings (a body meshed into
+the gas, like `cfd_ibm_fiber`) are a different pattern and do not use `dem_cfd`.
+
 ## What it does — resolved and unresolved particle–fluid coupling
 
 The two solvers run as **grass sub-Apps under one parent schedule** (`Tick → Couple`),

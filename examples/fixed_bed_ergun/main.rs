@@ -29,12 +29,12 @@
 //! **MacDonald et al. (1979)**, the "Ergun equation revisited" re-fit of the
 //! Blake–Kozeny / Burke–Plummer constants to a much larger data set, which
 //! recommends `180` (viscous) and `1.8` (inertial) in place of Ergun's `150` and
-//! `1.75` (see [`macdonald_beta`]). Those constants come from data Ergun never saw,
-//! so the measured value shares **no constant** with the Ergun *reference*; the
-//! relative error is a genuine, non-zero, Reynolds-dependent spread (~5–20 %, the
-//! documented inter-correlation difference — largest in the viscous-dominated
-//! regime where `180/150 ≈ 1.20`, shrinking toward the inertial end where
-//! `1.8/1.75 ≈ 1.03`).
+//! `1.75` (see [`dem_cfd::drag::macdonald_beta`]). Those constants come from data
+//! Ergun never saw, so the measured value shares **no constant** with the Ergun
+//! *reference*; the relative error is a genuine, non-zero, Reynolds-dependent spread
+//! (~5–20 %, the documented inter-correlation difference — largest in the
+//! viscous-dominated regime where `180/150 ≈ 1.20`, shrinking toward the inertial
+//! end where `1.8/1.75 ≈ 1.03`).
 //!
 //! ### What that makes falsifiable
 //!
@@ -59,20 +59,19 @@
 //! ## The deposited void fraction is load-bearing
 //!
 //! The per-particle drag is driven by a per-cell void fraction **deposited from the
-//! actual packing** ([`deposit_bed_void_fraction`]), not an analytic `ε_geo`. For
-//! that field to be usable the gas mesh must be **coarser than the particles** —
-//! the defining requirement of the *unresolved* regime — so each cell contains
-//! *many* sub-cell spheres and its deposited void fraction converges to the bed
-//! porosity. The `[mesh]` section sets a gas grid several particle diameters per
+//! actual packing** ([`dem_cfd::bed::deposit_bed_void_fraction`]), not an analytic
+//! `ε_geo`. For that field to be usable the gas mesh must be **coarser than the
+//! particles** — the defining requirement of the *unresolved* regime — so each cell
+//! contains *many* sub-cell spheres and its deposited void fraction converges to the
+//! bed porosity. The `[mesh]` section sets a gas grid several particle diameters per
 //! cell (`d/Δx ≪ 1`); the example gates that the deposited per-cell field is uniform
 //! to within `tol_deposit_cell` of `ε_bed` (a real deposition-fidelity check — a
 //! mis-binning deposit fails it), and then *uses* that field to evaluate the drag.
-//! The binning uses a **containment** locator here in the example: the seam's own
+//! The binning uses a **containment** locator (in `dem_cfd::bed`): the seam's own
 //! `coupling::deposit_void_fraction` uses an interpolation locator tuned for a
-//! single SUB-CELL particle and mis-bins at bed scale, so the bed-scale binning
-//! lives in this example (per the library-placement rule — one-off to the packed-
-//! bed cases). `ε_bed` itself is the exact geometric porosity of the FCC packing,
-//! used only for the Ergun reference and the superficial↔interstitial conversion.
+//! single SUB-CELL particle and mis-bins at bed scale. `ε_bed` itself is the exact
+//! geometric porosity of the FCC packing, used only for the Ergun reference and the
+//! superficial↔interstitial conversion.
 //!
 //! ## Momentum conservation (kept, but NOT the validation)
 //!
@@ -96,80 +95,33 @@
 //!     examples/fixed_bed_ergun/config.toml
 //! ```
 //!
+//! The shared unresolved DEM↔CFD machinery — config blocks, the MacDonald/Ergun β
+//! closures + [`SeamMode`], the Ergun references, void-fraction deposition, the
+//! interstitial-flow / momentum-sink plumbing, FCC packing, and the seam resources —
+//! lives in the `dem_cfd` crate. This case keeps its STATIC topology (a two-phase
+//! export-once schedule; the packing never moves) and its drag-only force model.
+//!
 //! References:
 //! * S. Ergun, "Fluid flow through packed columns", *Chem. Eng. Prog.* 48(2):89–94 (1952).
 //! * I.F. MacDonald, M.S. El-Sayed, K. Mow, F.A.L. Dullien, "Flow through Porous
 //!   Media — the Ergun Equation Revisited", *Ind. Eng. Chem. Fundam.* 18(3):199–208 (1979).
 
-use std::any::TypeId;
-
-use cfd_eos::{Eos, EosResource, IdealGas, Viscosity};
-use cfd_ibm::coupling::{
-    self, drag_force_from_beta, InterphaseForces, ParticleKinematics, ParticleSet,
-};
-use cfd_solver::{CfdStatePlugin, IdealGasPlugin};
-use cfd_state::{CfdState, PrimVar};
-use field_core::{
-    FieldDefaultPlugins, FieldRegistry, FvMesh, MeshScheduleSet, StructuredMesh, UniformMesh,
-    UniformMeshConfig, Vec3,
-};
+use cfd_eos::{Eos, EosResource};
+use cfd_ibm::coupling::{self, drag_force_from_beta, InterphaseForces, ParticleKinematics, ParticleSet};
+use cfd_state::CfdState;
+use field_core::{FieldRegistry, FvMesh, MeshScheduleSet, UniformMesh, UniformMeshConfig, Vec3};
 use grass_app::prelude::*;
 use grass_io::Config;
-use grass_multi::{tick_subapp, Multi, MultiAppExt, SubApps};
+use grass_multi::{tick_subapp, Multi, MultiAppExt};
 use grass_scheduler::prelude::*;
 use grass_scheduler::{Res, ResMut};
 use serde::Deserialize;
 use soil_core::Atom;
 use soil_verlet::VelocityVerletPlugin;
 
-const R_GAS: f64 = 287.058; // matches IdealGas::air()
+use dem_cfd::prelude::*;
 
-// ─── Declarative case ────────────────────────────────────────────────────────
-
-#[derive(Deserialize, Default)]
-struct GasCfg {
-    rho: f64,
-    p: f64,
-    /// Dynamic viscosity μ [Pa·s].
-    mu: f64,
-}
-
-#[derive(Deserialize, Default)]
-struct ParticleCfg {
-    /// Bead diameter d [m] (used by the drag closure).
-    diameter: f64,
-    density: f64,
-}
-
-/// FCC packing: `nc*` conventional cells (4 spheres each), lattice constant set so
-/// the solid fraction equals `solid_fraction` (bed porosity ε = 1 − solid_fraction).
-/// FCC (not simple cubic) so we can reach the canonical ε ≈ 0.4 with *non-overlapping*
-/// spheres — simple cubic caps at ε ≈ 0.476.
-#[derive(Deserialize, Default)]
-struct PackingCfg {
-    ncx: usize,
-    ncy: usize,
-    ncz: usize,
-    /// Target solid volume fraction φ = 1 − ε (must be ≤ 0.74, the FCC max).
-    solid_fraction: f64,
-}
-
-/// Gas mesh — **coarser than the particles** (the unresolved regime). `nx*` must
-/// divide the packing's conventional-cell counts so the domain tiles evenly; each
-/// gas cell then spans `ncx/nx × … ` conventional cells and holds many spheres.
-#[derive(Deserialize, Default)]
-struct MeshCfg {
-    nx: usize,
-    ny: usize,
-    nz: usize,
-    /// Ghost-cell width for the gas mesh.
-    #[serde(default = "default_ng")]
-    ng: usize,
-}
-
-fn default_ng() -> usize {
-    2
-}
+// ─── Case-specific config (the shared blocks come from dem_cfd::config) ───────
 
 #[derive(Deserialize, Default)]
 struct FlowCfg {
@@ -188,57 +140,12 @@ struct ValidationCfg {
     eps_max: f64,
     /// The sweep must reach DOWN to at least this modified Re_p (viscous-dominated end).
     rep_viscous_below: f64,
-    /// …and UP to at least this modified Re_p (inertia-comparable end) — proves the
-    /// sweep spans the Ergun crossover rather than a single regime.
+    /// …and UP to at least this modified Re_p (inertia-comparable end).
     rep_inertial_above: f64,
     /// Two-way momentum-exchange conservation tolerance (sink vs −ΣF_drag·dt).
     tol_momentum: f64,
-    /// Max |ε_cell(deposit) − ε_bed| / ε_bed over interior cells: the deposited
-    /// per-cell void fraction that DRIVES the drag must reproduce the bed porosity
-    /// (a mis-binning deposit fails this — the field is load-bearing, not analytic).
+    /// Max |ε_cell(deposit) − ε_bed| / ε_bed over interior cells (deposition fidelity).
     tol_deposit_cell: f64,
-}
-
-// ─── Seam-side resources on the FIELD sub-App ────────────────────────────────
-
-/// The imposed superficial velocity for the current sweep point (world axes),
-/// set by the parent between runs; the FIELD side turns it into the interstitial
-/// gas velocity `U/ε` it writes into the cells.
-#[derive(Clone, Copy, Default)]
-struct Superficial {
-    u: Vec3,
-}
-
-/// Which drag closure the measured path assembles, and whether to corrupt the
-/// `Σ → dP/L` reduction (the negative control). Set by the parent per pass.
-#[derive(Clone, Copy)]
-struct SeamMode {
-    /// `true` → independent MacDonald(1979) closure; `false` → Ergun(1952) closure
-    /// (used only by the negative control's baseline, never by the real validation).
-    macdonald: bool,
-    /// `true` → inject the `ε²`-instead-of-`ε³` reduction bug (negative control).
-    corrupt_eps_power: bool,
-}
-
-impl Default for SeamMode {
-    fn default() -> Self {
-        Self { macdonald: true, corrupt_eps_power: false }
-    }
-}
-
-/// The static seam context read by the FIELD system — gas transport, bed porosity
-/// ε (for `U/ε` and the superficial↔interstitial conversion), the coupling
-/// timestep, and the current [`SeamMode`]. Bundled into one resource so the system
-/// stays within the scheduler's parameter-count limit.
-#[derive(Clone, Copy)]
-struct SeamCtx {
-    mu: f64,
-    rho: f64,
-    /// Bed porosity ε = 1 − Σ V_p / V_bed.
-    eps: f64,
-    /// Coupling timestep handed to the momentum sink.
-    dt: f64,
-    mode: SeamMode,
 }
 
 /// Result of one fixed-bed evaluation, read back by the parent.
@@ -254,110 +161,12 @@ struct BedResult {
     mom_err: f64,
 }
 
-// ─── Independent packed-bed closure: MacDonald et al. (1979) ─────────────────
+// ─── FIELD sub-App: impose the flow, run the seam, report the drag ───────────
+//
+// Plumbing (impose the interstitial velocity, deposit the void fraction, the
+// momentum sink + conservation check) is from `dem_cfd::bed`; the case-specific
+// part is the STATIC (u_p = 0) drag-only force model + its deposition diagnostics.
 
-/// Interphase momentum-exchange coefficient `β` [kg/(m³·s)] in the **MacDonald et
-/// al. (1979)** form — the "Ergun equation revisited" re-fit of the Blake–Kozeny
-/// (viscous) and Burke–Plummer (inertial) constants to a far larger data set,
-/// recommending `180` and `1.8` (smooth particles) where Ergun used `150` and
-/// `1.75`:
-///
-/// ```text
-///   β = 180 (1−ε)² μ /(ε d²)  +  1.8 (1−ε) ρ_f |u_rel| / d
-/// ```
-///
-/// This is the **independent** measured closure — it shares no constant with the
-/// Ergun *reference* — so `drag_force_from_beta(β, …)` summed over the packing
-/// reduces to the MacDonald `dP/L`, which differs from Ergun by the documented
-/// ~5–20 % inter-correlation spread rather than by machine epsilon.
-fn macdonald_beta(eps: f64, rho_f: f64, mu: f64, diameter: f64, rel_speed: f64) -> f64 {
-    let eps = eps.clamp(1e-6, 1.0);
-    let one_m = 1.0 - eps;
-    180.0 * one_m * one_m * mu / (eps * diameter * diameter)
-        + 1.8 * one_m * rho_f * rel_speed / diameter
-}
-
-/// Ergun (1952) β, same functional form with the original `150 / 1.75`. Used ONLY
-/// by the negative control's baseline pass (to show that with a *correct* reduction
-/// the Ergun closure reproduces the Ergun reference, i.e. that the harness itself is
-/// wired right); the real validation never uses it (that would be the tautology).
-fn ergun_beta(eps: f64, rho_f: f64, mu: f64, diameter: f64, rel_speed: f64) -> f64 {
-    let eps = eps.clamp(1e-6, 1.0);
-    let one_m = 1.0 - eps;
-    150.0 * one_m * one_m * mu / (eps * diameter * diameter)
-        + 1.75 * one_m * rho_f * rel_speed / diameter
-}
-
-// ─── Bed-scale void-fraction deposition (containment binning) ────────────────
-
-/// Interior cell-center coordinates along each axis (uniform, separable grid).
-fn axis_centers(mesh: &UniformMesh) -> ([Vec<f64>; 3], usize) {
-    let [ni, nj, nk] = mesh.dims();
-    let ng = mesh.n_ghost();
-    let xc = (0..ni).map(|i| mesh.cell_centroid(mesh.idx_raw(i + ng, ng, ng))[0]).collect();
-    let yc = (0..nj).map(|j| mesh.cell_centroid(mesh.idx_raw(ng, j + ng, ng))[1]).collect();
-    let zc = (0..nk).map(|k| mesh.cell_centroid(mesh.idx_raw(ng, ng, k + ng))[2]).collect();
-    ([xc, yc, zc], ng)
-}
-
-/// Nearest interior index along an axis = the CONTAINING cell for a uniform grid.
-#[inline]
-fn nearest_center(cs: &[f64], v: f64) -> usize {
-    if cs.len() < 2 {
-        return 0;
-    }
-    let dx = cs[1] - cs[0];
-    (((v - cs[0]) / dx).round() as isize).clamp(0, cs.len() as isize - 1) as usize
-}
-
-/// Raw cell index containing `p` by nearest-center (containment) binning.
-fn containing_cell(mesh: &UniformMesh, centers: &[Vec<f64>; 3], ng: usize, p: Vec3) -> usize {
-    let i = nearest_center(&centers[0], p[0]);
-    let j = nearest_center(&centers[1], p[1]);
-    let k = nearest_center(&centers[2], p[2]);
-    mesh.idx_raw(i + ng, j + ng, k + ng)
-}
-
-/// Per-cell void fraction of the packing by CONTAINMENT deposition: each particle's
-/// volume is charged to the cell that geometrically contains its center, giving
-/// `ε_cell = 1 − Σ V_p / V_cell`. This is the correct bed-scale volume-average the
-/// unresolved coupling needs. (The seam's own `coupling::deposit_void_fraction`
-/// uses an interpolation locator tuned for a single SUB-CELL particle and mis-bins
-/// at bed scale, so the bed-scale binning is done here, per the library-placement
-/// rule — it is one-off to the packed-bed cases.) Returns the field plus the
-/// per-particle containing-cell indices (reused to drive the drag).
-fn deposit_bed_void_fraction(
-    mesh: &UniformMesh,
-    particles: &[ParticleKinematics],
-) -> (Vec<f64>, Vec<usize>) {
-    let (centers, ng) = axis_centers(mesh);
-    let total = mesh.n_cells_total();
-    let mut solid = vec![0.0f64; total];
-    let mut cell_of_particle = Vec::with_capacity(particles.len());
-    for p in particles {
-        let c = containing_cell(mesh, &centers, ng, p.center);
-        solid[c] += p.volume();
-        cell_of_particle.push(c);
-    }
-    let mut eps = vec![1.0f64; total];
-    for c in 0..total {
-        let v = mesh.cell_volume(c);
-        if v > 0.0 {
-            eps[c] = (1.0 - solid[c] / v).clamp(1e-6, 1.0);
-        }
-    }
-    (eps, cell_of_particle)
-}
-
-// ─── FIELD sub-App: impose the superficial flow, run the seam, read ΣF ────────
-
-/// `Output` phase on the CFD sub-App. Imposes the interstitial gas velocity
-/// `u_g = U/ε` in every interior cell, then runs the unresolved seam on the
-/// immersed packing: deposit void fraction, evaluate the selected per-particle drag
-/// closure from the DEPOSITED per-cell void fraction, sum it, and feed the
-/// equal-and-opposite momentum sink back into the gas (checking conservation). The
-/// summed drag is the bulk the parent turns into dP/L.
-#[allow(clippy::too_many_arguments)]
 fn fixed_bed_seam_system(
     mesh: Res<UniformMesh>,
     reg: Res<FieldRegistry>,
@@ -374,31 +183,17 @@ fn fixed_bed_seam_system(
     forces.reset(parts.len());
     let mode = ctx.mode;
 
-    // Interstitial gas velocity u_g = U/ε_bed (the pore-scale velocity the drag
-    // closure sees). Impose it uniformly in every interior cell; leave ρ untouched.
+    // Interstitial gas velocity u_g = U/ε_bed, imposed uniformly (ρ untouched).
     let eps_bed = ctx.eps;
     let inv_eps = 1.0 / eps_bed;
     let u_g = [sup.u[0] * inv_eps, sup.u[1] * inv_eps, sup.u[2] * inv_eps];
-    for c in 0..mesh.n_cells_total() {
-        if !mesh.is_local_cell(c) {
-            continue;
-        }
-        let rho = state.u[c].rho;
-        state.u[c].rho_u = rho * u_g[0];
-        state.u[c].rho_v = rho * u_g[1];
-        state.u[c].rho_w = rho * u_g[2];
-    }
+    impose_interstitial_velocity(&mesh, &mut state, u_g);
 
-    // Deposit the packing's solid volume onto the mesh by containment binning. In
-    // the unresolved regime (gas cell ≫ particle) each cell holds many spheres, so
-    // this per-cell field converges to the bed porosity and is the field that DRIVES
-    // the drag below. Report its worst interior-cell deviation from ε_bed as the
-    // deposition-fidelity diagnostic.
-    let (eps_field, cell_of_particle) = deposit_bed_void_fraction(&*mesh, parts);
+    // Deposit the packing's solid volume onto the mesh; report worst interior-cell
+    // deviation from ε_bed as the deposition-fidelity diagnostic.
+    let (eps_field, cell_of_particle) = deposit_bed_void_fraction(&mesh, parts);
     let (mut e_min, mut e_max, mut e_err) = (f64::INFINITY, 0.0f64, 0.0f64);
     for (c, &e) in eps_field.iter().enumerate() {
-        // Only interior cells that actually received packing (a coarse gas mesh may
-        // have padding cells the bed does not fill).
         if !mesh.is_local_cell(c) || e >= 1.0 - 1e-9 {
             continue;
         }
@@ -418,18 +213,13 @@ fn fixed_bed_seam_system(
         let u_gas =
             coupling::sample_gas_velocity(&*mesh, &state, eos, p.center).unwrap_or([0.0; 3]);
         let rho_f = coupling::sample_gas_density(&*mesh, &state, p.center).unwrap_or(ctx.rho);
-        // Void fraction from the deposited field at the particle's containing cell.
         let eps = eps_field[cell_of_particle[i]];
 
         // Static packing: u_p = 0, so the slip IS the local interstitial velocity.
         let rel = u_gas;
         let rel_speed = (rel[0] * rel[0] + rel[1] * rel[1] + rel[2] * rel[2]).sqrt();
         let d = p.diameter();
-        let beta = if mode.macdonald {
-            macdonald_beta(eps, rho_f, ctx.mu, d, rel_speed)
-        } else {
-            ergun_beta(eps, rho_f, ctx.mu, d, rel_speed)
-        };
+        let beta = beta_for(mode, eps, rho_f, ctx.mu, d, rel_speed);
         let drag = drag_force_from_beta(beta, p.volume(), eps, rel);
 
         forces.force[i] = drag;
@@ -438,10 +228,7 @@ fn fixed_bed_seam_system(
             f_total[k] += drag[k];
         }
     }
-    // Negative control: corrupt the reduction with the ε²-instead-of-ε³ bug. The
-    // parent divides ΣF by (V_bed·ε) to get dP/L; scaling ΣF by 1/ε here makes the
-    // assembled law scale as 1/ε³·(1/ε)… i.e. one wrong void-fraction power, a
-    // ~1/ε ≈ 2.5× error. The real validation never sets this flag.
+    // Negative control: corrupt the reduction with the ε²-instead-of-ε³ bug.
     if mode.corrupt_eps_power {
         for k in 0..3 {
             f_total[k] /= eps_bed;
@@ -450,65 +237,25 @@ fn fixed_bed_seam_system(
     result.f_total = f_total;
 
     // Two-way momentum sink + conservation check (NOT the pressure-drop validation).
-    let mut m0 = [0.0f64; 3];
-    for c in 0..mesh.n_cells_total() {
-        if mesh.is_local_cell(c) {
-            let v = mesh.cell_volume(c);
-            m0[0] += state.u[c].rho_u * v;
-            m0[1] += state.u[c].rho_v * v;
-            m0[2] += state.u[c].rho_w * v;
-        }
-    }
-    coupling::apply_momentum_sink(&*mesh, &mut state, parts, &drag_on_particle, ctx.dt);
-    let mut m1 = [0.0f64; 3];
-    for c in 0..mesh.n_cells_total() {
-        if mesh.is_local_cell(c) {
-            let v = mesh.cell_volume(c);
-            m1[0] += state.u[c].rho_u * v;
-            m1[1] += state.u[c].rho_v * v;
-            m1[2] += state.u[c].rho_w * v;
-        }
-    }
-    let mut dn = 0.0f64;
-    let mut sc = 0.0f64;
-    for k in 0..3 {
-        let dm = m1[k] - m0[k]; // gas momentum change
-        let imp = -drag_on_particle.iter().map(|f| f[k]).sum::<f64>() * ctx.dt; // −ΣF_drag·dt
-        dn += (dm - imp) * (dm - imp);
-        sc += imp * imp;
-    }
-    result.mom_err = dn.sqrt() / sc.sqrt().max(1e-30);
+    result.mom_err = momentum_sink_and_check(&mesh, &mut state, parts, &drag_on_particle, ctx.dt);
 }
 
-fn build_cfd(gc: &GasCfg, mesh_cfg: UniformMeshConfig, eps: f64, dt: f64) -> App {
-    let (rho, p) = (gc.rho, gc.p);
-    let t = p / (rho * R_GAS);
-    let init = move |_x: Vec3| {
-        let eos = IdealGas::air();
-        eos.prim_to_cons(&PrimVar::new(rho, 0.0, 0.0, 0.0, p, t))
-    };
-
-    let mut app = App::new();
-    app.add_plugins(FieldDefaultPlugins { mesh: mesh_cfg })
-        .add_plugins(CfdStatePlugin::new(init))
-        .add_plugins(IdealGasPlugin);
-    app.add_resource(Viscosity::Constant(gc.mu));
-    app.add_resource(SeamCtx {
-        mu: gc.mu,
-        rho: gc.rho,
+fn build_cfd(gas: &GasCfg, mesh_cfg: UniformMeshConfig, eps: f64, dt: f64) -> App {
+    let ctx = SeamCtx {
+        mu: gas.mu,
+        rho: gas.rho,
         eps,
+        g: [0.0, 0.0, 0.0], // static bed: no hydrostatic buoyancy term
         dt,
         mode: SeamMode::default(),
-    });
-    app.add_resource(Superficial::default());
-    app.add_resource(ParticleSet::default());
-    app.add_resource(InterphaseForces::default());
+    };
+    let mut app = build_cfd_base(gas, mesh_cfg, ctx);
     app.add_resource(BedResult::default());
     app.add_update_system(fixed_bed_seam_system, MeshScheduleSet::Output);
     app
 }
 
-// ─── SOIL sub-App: the static packing ────────────────────────────────────────
+// ─── SOIL sub-App: the STATIC packing (never integrated) ─────────────────────
 
 fn build_soil(positions: &[[f64; 3]], radius: f64, density: f64) -> App {
     let mut atoms = Atom::new();
@@ -526,54 +273,6 @@ fn build_soil(positions: &[[f64; 3]], radius: f64, density: f64) -> App {
     // the packing stays static.
     app.add_plugins(VelocityVerletPlugin::new());
     app
-}
-
-/// FCC sphere centers filling `[0,Lx]×[0,Ly]×[0,Lz]` with `nc*` conventional cells
-/// of side `a`. The 4-atom basis is shifted by `(¼,¼,¼)a` so every center sits
-/// strictly *inside* its conventional cell.
-fn fcc_packing(nc: [usize; 3], a: f64) -> (Vec<[f64; 3]>, [f64; 3]) {
-    let s = 0.25;
-    let basis = [
-        [s, s, s],
-        [s, 0.5 + s, 0.5 + s],
-        [0.5 + s, s, 0.5 + s],
-        [0.5 + s, 0.5 + s, s],
-    ];
-    let mut pos = Vec::with_capacity(4 * nc[0] * nc[1] * nc[2]);
-    for i in 0..nc[0] {
-        for j in 0..nc[1] {
-            for k in 0..nc[2] {
-                for b in &basis {
-                    pos.push([
-                        (i as f64 + b[0]) * a,
-                        (j as f64 + b[1]) * a,
-                        (k as f64 + b[2]) * a,
-                    ]);
-                }
-            }
-        }
-    }
-    let bounds = [nc[0] as f64 * a, nc[1] as f64 * a, nc[2] as f64 * a];
-    (pos, bounds)
-}
-
-// ─── Ergun (1952) reference — the literature correlation we match ─────────────
-
-/// Ergun (1952) packed-bed pressure drop per unit length — the reference. This is
-/// the literature correlation itself (`150 / 1.75`), independent of the measured
-/// MacDonald closure assembled through the seam.
-fn ergun_dp_per_length(eps: f64, mu: f64, rho: f64, d: f64, u_superficial: f64) -> f64 {
-    let om = 1.0 - eps;
-    let e3 = eps * eps * eps;
-    let viscous = 150.0 * om * om / e3 * mu * u_superficial / (d * d);
-    let inertial = 1.75 * om / e3 * rho * u_superficial * u_superficial / d;
-    viscous + inertial
-}
-
-/// Modified particle Reynolds number `Re_p = ρ U d / (μ (1−ε))` — the standard
-/// packed-bed Reynolds that places the sweep on the Ergun viscous↔inertial map.
-fn modified_reynolds(rho: f64, u: f64, d: f64, mu: f64, eps: f64) -> f64 {
-    rho * u * d / (mu * (1.0 - eps))
 }
 
 /// Run the full superficial-velocity sweep once for a given seam mode, returning
@@ -628,23 +327,14 @@ fn main() {
         "mesh {}x{}x{} must divide packing {}x{}x{} evenly",
         meshc.nx, meshc.ny, meshc.nz, pack.ncx, pack.ncy, pack.ncz
     );
-    let a = d * (2.0 * std::f64::consts::PI / (3.0 * pack.solid_fraction)).cbrt();
+    let a = fcc_lattice_constant(d, pack.solid_fraction);
     let (positions, bounds) = fcc_packing([pack.ncx, pack.ncy, pack.ncz], a);
     let n = positions.len();
     let v_bed = bounds[0] * bounds[1] * bounds[2];
     let eps_geo = 1.0 - n as f64 * v_p / v_bed;
     let nn_gap = a / std::f64::consts::SQRT_2 - d; // nearest-neighbour surface gap
 
-    let mesh_cfg = UniformMeshConfig {
-        nx: meshc.nx,
-        ny: meshc.ny,
-        nz: meshc.nz,
-        ng: meshc.ng,
-        bounds_lo: [0.0, 0.0, 0.0],
-        bounds_hi: bounds,
-        y_edges: None,
-        z_edges: None,
-    };
+    let mesh_cfg = meshc.to_uniform(bounds);
     let n_cells = (meshc.nx * meshc.ny * meshc.nz) as f64;
 
     let soil = build_soil(&positions, radius, pc.density);
@@ -689,7 +379,7 @@ fn main() {
     );
 
     // ── The validation: MEASURED = independent MacDonald closure through the seam.
-    let mode = SeamMode { macdonald: true, corrupt_eps_power: false };
+    let mode = SeamMode { macdonald: true, corrupt_eps_power: false, ..SeamMode::default() };
     let (dpdl_meas, worst_dep, worst_mom) = run_sweep(&mut parent, &flow.superficial, v_bed, eps_geo, mode);
 
     let mut all_ok = true;
@@ -723,7 +413,7 @@ fn main() {
     // ── Negative control: corrupt the seam reduction (ε² instead of ε³) and show
     // it blows past the tolerance — proof the pass is genuinely capable of failing
     // and the tolerance is not tuned to admit a broken seam.
-    let corrupt = SeamMode { macdonald: true, corrupt_eps_power: true };
+    let corrupt = SeamMode { macdonald: true, corrupt_eps_power: true, ..SeamMode::default() };
     let (dpdl_bad, _, _) = run_sweep(&mut parent, &flow.superficial, v_bed, eps_geo, corrupt);
     let mut worst_bad = 0.0f64;
     for (idx, &u) in flow.superficial.iter().enumerate() {
@@ -791,7 +481,7 @@ fn main() {
     }
 }
 
-// ─── Parent coupling schedule ────────────────────────────────────────────────
+// ─── Parent coupling schedule (STATIC: export the packing once, tick the gas) ─
 
 #[derive(Debug, Clone, Copy)]
 enum Phase {
@@ -813,7 +503,7 @@ impl ScheduleSet for Phase {
     }
 }
 
-/// SOIL→FIELD half of the seam: hand the static packing's kinematics across.
+/// SOIL→FIELD half of the seam: hand the static packing's kinematics across (once).
 fn export_kinematics(world: Multi) {
     let atoms = world.expect_read::<Atom>("soil");
     let n = atoms.nlocal as usize;
@@ -836,35 +526,7 @@ fn export_kinematics(world: Multi) {
     }
 }
 
-// ─── Post-run access via the parent's SubApps (outside any system) ────────────
-
-fn set_superficial(parent: &App, u: Vec3) {
-    let subs = parent.get_resource_ref::<SubApps>().unwrap();
-    let cell = subs
-        .find("cfd")
-        .unwrap()
-        .resource_cell(TypeId::of::<Superficial>())
-        .unwrap();
-    cell.borrow_mut().downcast_mut::<Superficial>().unwrap().u = u;
-}
-
-fn set_seam_mode(parent: &App, mode: SeamMode) {
-    let subs = parent.get_resource_ref::<SubApps>().unwrap();
-    let cell = subs
-        .find("cfd")
-        .unwrap()
-        .resource_cell(TypeId::of::<SeamCtx>())
-        .unwrap();
-    cell.borrow_mut().downcast_mut::<SeamCtx>().unwrap().mode = mode;
-}
-
+/// (Σ drag, deposition err, momentum err, …) read back from the `cfd` sub-App.
 fn read_result(parent: &App) -> BedResult {
-    let subs = parent.get_resource_ref::<SubApps>().unwrap();
-    let cell = subs
-        .find("cfd")
-        .unwrap()
-        .resource_cell(TypeId::of::<BedResult>())
-        .unwrap()
-        .borrow();
-    *cell.downcast_ref::<BedResult>().unwrap()
+    read_subapp_resource::<BedResult>(parent, "cfd")
 }
