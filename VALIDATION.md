@@ -52,6 +52,8 @@ ghost-cell IBM. Two stages: (1) exact hydrostatic coupling (Archimedes buoyancy)
 drag anisotropy of a slender body vs Tirado–García de la Torre, with a single-bead and
 `r=1` (isotropic) control that must be rejected.
 
+![fiber validation](examples/cfd_ibm_fiber/plots/fiber_validation.png)
+
 | observable | measured | reference | rel. err | tol |
 |---|---|---|---|---|
 | Stage 1 buoyancy | 1.21 % | Archimedes exact | — | PASS |
@@ -62,5 +64,6 @@ drag anisotropy of a slender body vs Tirado–García de la Torre, with a single
 ---
 
 _Figures are committed under `examples/<name>/plots/`. `settling_sphere` regenerates its
-figure via `$BENCH_PYTHON examples/settling_sphere/plot.py`; graph backfill for the other
-three cases is tracked as follow-up (they currently report PASS/FAIL numerically)._
+figure via `$BENCH_PYTHON examples/settling_sphere/plot.py`; `cfd_ibm_fiber` regenerates
+its figure via `$BENCH_PYTHON examples/cfd_ibm_fiber/plot.py`. Graph backfill for the
+remaining bed cases is tracked as follow-up (they currently report PASS/FAIL numerically)._
