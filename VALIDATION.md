@@ -46,7 +46,7 @@ Minimum fluidization velocity measured by **bisection on the live net seam force
 DEM bed, cross-checked against Wen & Yu, with Ergun/MacDonald exact-balance brackets and
 two negative controls (omit-∇P, ε-power bug).
 
-![fluidized bed minimum fluidization validation](examples/fluidized_bed_umf/plots/umf_validation.png)
+![fluidized-bed U_mf vs Wen & Yu](examples/fluidized_bed_umf/plots/umf_wen_yu.png)
 
 | observable | measured | reference | rel. err | tol |
 |---|---|---|---|---|
