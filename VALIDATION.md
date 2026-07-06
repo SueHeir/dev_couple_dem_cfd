@@ -27,6 +27,8 @@ Superficial gas driven through a packed SOIL bed; the seam pressure drop is comp
 to the Ergun correlation across a Reynolds sweep, with an **independent MacDonald (1979)**
 closure (so the check is not self-referential) and a corrupted-seam negative control.
 
+![fixed-bed Ergun relative error](examples/fixed_bed_ergun/plots/ergun_relative_error.png)
+
 | observable | measured | reference | tol |
 |---|---|---|---|
 | Ergun rel. err over `Re_p ∈ [1.1, 444]` | **5.63 % – 19.78 %** | Ergun (1952) | ≤ 25 % |
@@ -65,5 +67,7 @@ drag anisotropy of a slender body vs Tirado–García de la Torre, with a single
 
 _Figures are committed under `examples/<name>/plots/`. `settling_sphere` regenerates its
 figure via `$BENCH_PYTHON examples/settling_sphere/plot.py`; `cfd_ibm_fiber` regenerates
-its figure via `$BENCH_PYTHON examples/cfd_ibm_fiber/plot.py`. Graph backfill for the
-remaining bed cases is tracked as follow-up (they currently report PASS/FAIL numerically)._
+its figure via `$BENCH_PYTHON examples/cfd_ibm_fiber/plot.py`; `fixed_bed_ergun`
+regenerates its figure via `$BENCH_PYTHON examples/fixed_bed_ergun/plot.py`. Graph
+backfill for the remaining bed case is tracked as follow-up (it currently reports
+PASS/FAIL numerically)._
