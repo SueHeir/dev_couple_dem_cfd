@@ -63,6 +63,7 @@ examples span the coupling regimes:
 | `settling_sphere` | point-particle drag (Wen–Yu/Gidaspow) | Stokes (1851) terminal velocity |
 | `fixed_bed_ergun` | packed-bed drag closure | Ergun (1952) pressure drop |
 | `fluidized_bed_umf` | DEM bed ↔ gas, bisection on net seam force | Wen & Yu (1966) minimum fluidization |
+| `adaptive_umf_strategy` | DEM bed ↔ gas, strategy cadence sweep | Wen & Yu U_mf + coupling residual reduction |
 | `cfd_ibm_fiber` | DIRT bonded-sphere clump ↔ gas (resolved IBM) | Archimedes buoyancy + Tirado slender-body drag |
 
 ```bash
@@ -70,6 +71,7 @@ examples span the coupling regimes:
 cargo run --release --example settling_sphere   -- examples/settling_sphere/config.toml
 cargo run --release --example fixed_bed_ergun    -- examples/fixed_bed_ergun/config.toml
 cargo run --release --example fluidized_bed_umf  -- examples/fluidized_bed_umf/config.toml
+cargo run --release --example adaptive_umf_strategy -- examples/adaptive_umf_strategy/config.toml
 cargo run --release --example cfd_ibm_fiber      -- examples/cfd_ibm_fiber/config.toml
 ```
 

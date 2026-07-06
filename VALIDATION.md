@@ -47,6 +47,25 @@ two negative controls (omit-∇P, ε-power bug).
 | `U_mf` (dynamic onset, a_z zero-crossing) | 0.5135 m/s | matches seam | < 5 % | — |
 | negative controls (omit-∇P / ε-bug) | +80.4 % / −53.2 % | must fail | > 15 % |
 
+## adaptive_umf_strategy — coupling cadence near Wen & Yu U_mf
+
+A reduced FCC bed uses the same live unresolved DEM-CFD force balance as
+`fluidized_bed_umf`, then compares three macro-coupling strategies: one-shot
+explicit, fixed four-way subcycling, and residual-gated subcycling. The science
+reference is still Wen & Yu; the strategy diagnostic is the macro-interval residual
+`\|a_z(measured)-a_z(force/M_bed)\|/g`.
+
+![adaptive UMF strategy](examples/adaptive_umf_strategy/plots/adaptive_umf_strategy.png)
+
+| observable | measured | reference | tol |
+|---|---|---|---|
+| `U_mf` (live seam bisection) | 0.5138 m/s | Wen & Yu 0.5380 m/s | 4.51 % ≤ 15 % |
+| dynamic `U_mf` (all strategies) | 0.5135 m/s | seam zero crossing | within 5 % |
+| worst residual, fixed explicit | 0.0699 g | strategy diagnostic | reported |
+| worst residual, residual-gated | 0.0133 g | gate 0.015 g | PASS |
+| residual reduction | 5.25x | min 1.5x | PASS |
+| negative controls (omit-∇P / ε-bug) | +80.4 % / −53.2 % | must fail | > 15 % |
+
 ## cfd_ibm_fiber — resolved bonded-clump immersed body (DIRT ↔ CFD)
 
 A slender fiber built as a **DIRT BPM bonded-sphere chain** immersed in the gas via the

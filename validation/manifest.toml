@@ -25,6 +25,13 @@ command = "cargo run --release --example fluidized_bed_umf -- examples/fluidized
 reference = "Wen & Yu (1966) minimum fluidization velocity via live net-force bisection, with omit-grad-P and eps-power negative controls. U_mf 0.5138 vs 0.5380 m/s (4.51%, tol 15%)."
 
 [[validation]]
+id = "adaptive_umf_strategy"
+mode = "full"
+kind = "cargo-example"
+command = "cargo run --release --example adaptive_umf_strategy -- examples/adaptive_umf_strategy/config.toml"
+reference = "Reduced Wen & Yu minimum-fluidization bed-force case comparing fixed explicit, fixed subcycled, and residual-gated coupling cadence. U_mf 0.5138 vs 0.5380 m/s (4.51%, tol 15%); residual-gated worst residual 0.0133g <= 0.015g and 5.25x lower than fixed explicit."
+
+[[validation]]
 id = "cfd_ibm_fiber"
 mode = "full"
 kind = "cargo-example"
