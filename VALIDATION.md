@@ -6,6 +6,11 @@ closure and a negative control so a passing gate cannot be a tautology. All numb
 below were reproduced in this repo (release build, sibling path deps). Reproduce with
 `./validation/run.sh` (smoke) or `./validation/run.sh full`.
 
+These DEM-CFD validations are in-process `grass_multi` sub-App runs. Remote-transport
+parity for the substrate-neutral `grass_multi` coupling path is exercised upstream in
+`grass/crates/grass_multi/tests/multi_phase3.rs`, including the
+`in_process_and_remote_transport_coupling_are_equivalent` case.
+
 ## settling_sphere — Stokes terminal velocity (point-particle seam)
 
 A 30 µm glass sphere settling in air at Re ≈ 0.13 (Stokes regime). The unresolved
