@@ -54,9 +54,14 @@ the gas, like `cfd_ibm_fiber`) are a different pattern and do not use `dem_cfd`.
 
 ## What it does — resolved and unresolved particle–fluid coupling
 
-The two solvers run as **grass sub-Apps under one parent schedule** (`Tick → Couple`),
-sharing exactly one `grass_app::App` and `soil_core::Atom` type across the seam. Four
-examples span the coupling regimes:
+The DEM-CFD examples in this repo run **in-process**: the two solvers are
+`grass` sub-Apps under one parent schedule (`Tick → Couple`), sharing exactly one
+`grass_app::App` and `soil_core::Atom` type across the seam. The same `grass_multi`
+wire/remote-sub-App machinery is covered generically upstream in
+`grass/crates/grass_multi/tests/multi_phase3.rs`, where an in-process coupled pair is
+compared against a remote-transport pair using `add_remote_subapp`. No DEM-CFD example
+here is presented as a two-binary MPI validation yet. Five examples span the coupling
+regimes:
 
 | example | coupling | validates against |
 |---|---|---|
