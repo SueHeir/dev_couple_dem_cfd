@@ -58,6 +58,10 @@ name = "fluidized_bed_umf"
 path = "examples/fluidized_bed_umf/main.rs"
 
 [[example]]
+name = "adaptive_umf_strategy"
+path = "examples/adaptive_umf_strategy/main.rs"
+
+[[example]]
 name = "cfd_ibm_fiber"
 path = "examples/cfd_ibm_fiber/main.rs"
 

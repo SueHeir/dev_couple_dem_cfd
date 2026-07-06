@@ -27,6 +27,9 @@ if [ "$MODE" = "full" ]; then
   # Wen & Yu (1966) minimum fluidization via live net-force bisection (neg controls).
   cargo run --release --example fluidized_bed_umf -- examples/fluidized_bed_umf/config.toml
 
+  # Coupling cadence near U_mf: explicit vs subcycled/residual-gated macro steps.
+  cargo run --release --example adaptive_umf_strategy -- examples/adaptive_umf_strategy/config.toml
+
   # Resolved DIRT bonded-clump fiber in the gas: Archimedes + Tirado slender-body drag.
   cargo run --release --example cfd_ibm_fiber -- examples/cfd_ibm_fiber/config.toml
 fi

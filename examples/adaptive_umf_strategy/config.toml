@@ -1,0 +1,65 @@
+# Coupling strategy comparison near minimum fluidization.
+#
+#   cargo run --release --example adaptive_umf_strategy -- \
+#       examples/adaptive_umf_strategy/config.toml
+#
+# The bed force and Wen & Yu reference are the same science target as
+# fluidized_bed_umf. The strategy sweep changes only how often the existing
+# export -> CFD seam -> import -> SOIL tick schedule is run inside one macro
+# coupling interval.
+
+[gas]
+rho = 1.2
+p = 1.0e5
+mu = 1.8e-5
+
+[particle]
+diameter = 1.0e-3
+density = 2500.0
+
+# Reduced FCC bed: enough particles per gas cell for an unresolved bed-force
+# analogue, but small enough to sweep several strategy candidates in one run.
+[packing]
+ncx = 4
+ncy = 4
+ncz = 8
+solid_fraction = 0.60
+
+[mesh]
+nx = 2
+ny = 2
+nz = 4
+ng = 2
+
+[gravity]
+gz = -9.81
+
+[flow]
+superficial = [0.30, 0.40, 0.45, 0.50, 0.55, 0.60, 0.70]
+macro_dt = 4.0e-4
+macro_steps = 4
+
+[[strategy]]
+name = "fixed_explicit"
+kind = "fixed_explicit"
+substeps = 1
+
+[[strategy]]
+name = "fixed_subcycle_4"
+kind = "fixed_subcycle"
+substeps = 4
+
+[[strategy]]
+name = "residual_gated"
+kind = "residual_gated"
+candidates = [1, 2, 4, 8]
+residual_tol = 0.015
+
+[validation]
+tol_rel_umf = 0.15
+umf_err_floor = 0.01
+tol_handoff = 0.015
+eps_max = 0.5
+tol_momentum = 1.0e-6
+tol_deposit_cell = 0.02
+min_residual_improvement = 1.5
