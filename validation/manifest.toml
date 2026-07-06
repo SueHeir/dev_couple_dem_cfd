@@ -11,6 +11,13 @@ command = "cargo run --release --example settling_sphere -- examples/settling_sp
 reference = "Stokes (1851) terminal velocity, low-Reynolds settling sphere through the Wen-Yu/Gidaspow drag seam. v_t 0.0662 vs 0.0681 m/s (2.78%)."
 
 [[validation]]
+id = "implicit_added_mass"
+mode = "smoke"
+kind = "cargo-example"
+command = "cargo run --release --example implicit_added_mass -- examples/implicit_added_mass/config.toml"
+reference = "Dense added-mass interface map on the same DEM-CFD seam: explicit couple_two_way residual grows 1.541e3x, while grass_multi::converge_outer_iter with Aitken reaches the analytic fixed point 0.25 in 3 iterations with residual 8.3e-17."
+
+[[validation]]
 id = "fixed_bed_ergun"
 mode = "full"
 kind = "cargo-example"

@@ -64,6 +64,7 @@ examples span the coupling regimes:
 | `fixed_bed_ergun` | packed-bed drag closure | Ergun (1952) pressure drop |
 | `fluidized_bed_umf` | DEM bed ↔ gas, bisection on net seam force | Wen & Yu (1966) minimum fluidization |
 | `adaptive_umf_strategy` | DEM bed ↔ gas, strategy cadence sweep | Wen & Yu U_mf + coupling residual reduction |
+| `implicit_added_mass` | dense added-mass interface stress case | explicit divergence + Aitken convergence on the same seam |
 | `cfd_ibm_fiber` | DIRT bonded-sphere clump ↔ gas (resolved IBM) | Archimedes buoyancy + Tirado slender-body drag |
 
 ```bash
@@ -72,6 +73,7 @@ cargo run --release --example settling_sphere   -- examples/settling_sphere/conf
 cargo run --release --example fixed_bed_ergun    -- examples/fixed_bed_ergun/config.toml
 cargo run --release --example fluidized_bed_umf  -- examples/fluidized_bed_umf/config.toml
 cargo run --release --example adaptive_umf_strategy -- examples/adaptive_umf_strategy/config.toml
+cargo run --release --example implicit_added_mass -- examples/implicit_added_mass/config.toml
 cargo run --release --example cfd_ibm_fiber      -- examples/cfd_ibm_fiber/config.toml
 ```
 
@@ -82,6 +84,13 @@ The settling-sphere gate relaxes onto the Stokes / Schiller–Naumann terminal v
 through the live drag seam:
 
 ![settling terminal velocity](examples/settling_sphere/plots/terminal_velocity.png)
+
+The added-mass gate uses the same seam to show the shared-state access story:
+explicit `couple_two_way` diverges on a strong interface map, while the parent can
+read, relax, and inject the interface state in place with `converge_outer_iter` +
+Aitken relaxation:
+
+![implicit added-mass seam convergence](examples/implicit_added_mass/plots/implicit_added_mass.png)
 
 ## License
 

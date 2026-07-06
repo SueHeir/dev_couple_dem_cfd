@@ -62,6 +62,10 @@ name = "adaptive_umf_strategy"
 path = "examples/adaptive_umf_strategy/main.rs"
 
 [[example]]
+name = "implicit_added_mass"
+path = "examples/implicit_added_mass/main.rs"
+
+[[example]]
 name = "cfd_ibm_fiber"
 path = "examples/cfd_ibm_fiber/main.rs"
 
