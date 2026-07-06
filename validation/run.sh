@@ -18,6 +18,9 @@ echo "=== dev_couple_dem_cfd validation set (mode=$MODE) ==="
 # Stokes terminal velocity, low-Reynolds settling sphere through the drag seam.
 cargo run --release --example settling_sphere -- examples/settling_sphere/config.toml
 
+# Dense added-mass interface map: explicit seam diverges, Aitken outer iteration converges.
+cargo run --release --example implicit_added_mass -- examples/implicit_added_mass/config.toml
+
 if [ "$MODE" = "full" ]; then
   # --- Full gates: heavier bed/fiber couplings. Scheduled / on-demand only. ---
 

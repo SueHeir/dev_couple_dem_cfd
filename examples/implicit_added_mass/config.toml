@@ -1,0 +1,32 @@
+[gas]
+rho = 1000.0
+mu = 1.0e-3
+p = 101325.0
+
+[grid]
+nx = 1
+ny = 1
+nz = 1
+ng = 2
+bounds_lo = [0.0, 0.0, 0.0]
+bounds_hi = [1.0, 1.0, 1.0]
+
+[particle]
+radius = 0.1
+density = 238.732414637843
+z0 = 0.5
+
+[coupling]
+dt = 1.0
+map_slope = -3.0
+map_intercept = 1.0
+explicit_steps = 22
+implicit_max_iters = 30
+implicit_tol = 1.0e-10
+aitken_omega0 = 0.8
+
+[validation]
+explicit_min_growth = 1000.0
+implicit_solution_tol = 1.0e-9
+implicit_residual_tol = 1.0e-10
+max_implicit_iters = 8

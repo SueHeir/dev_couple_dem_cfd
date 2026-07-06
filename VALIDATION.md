@@ -66,6 +66,26 @@ reference is still Wen & Yu; the strategy diagnostic is the macro-interval resid
 | residual reduction | 5.25x | min 1.5x | PASS |
 | negative controls (omit-∇P / ε-bug) | +80.4 % / −53.2 % | must fail | > 15 % |
 
+## implicit_added_mass — explicit divergence vs shared-state Aitken convergence
+
+A minimal dense-regime added-mass interface map, `v_tilde = -3v + 1`, is run across
+the existing DEM-CFD seam. Plain `couple_two_way` is the explicit partitioned path
+and has spectral radius 3, so it must diverge. The implicit run uses the same
+`Export → TickCfd → Import → TickSoil` seam systems, then
+`grass_multi::converge_outer_iter` reads the raw interface velocity, applies Aitken
+relaxation, and writes the relaxed value back in place. This is positioned as
+shared-state access and zero-copy inject-anywhere coupling, not as an
+implicit-coupling novelty claim.
+
+![explicit divergence and Aitken convergence](examples/implicit_added_mass/plots/implicit_added_mass.png)
+
+| observable | measured | reference | tol |
+|---|---|---|---|
+| explicit residual growth | **1.541e3x** | divergent `a=-3` Picard map | ≥ 1e3 |
+| Aitken fixed point | 0.250000000000 | analytic `1/(1-(-3))` | abs err ≤ 1e-9 |
+| Aitken residual | 8.3e-17 | zero fixed-point residual | ≤ 1e-10 |
+| Aitken iterations | 3 | convergence cap | ≤ 8 |
+
 ## cfd_ibm_fiber — resolved bonded-clump immersed body (DIRT ↔ CFD)
 
 A slender fiber built as a **DIRT BPM bonded-sphere chain** immersed in the gas via the
@@ -87,6 +107,8 @@ drag anisotropy of a slender body vs Tirado–García de la Torre, with a single
 _Figures are committed under `examples/<name>/plots/`. `settling_sphere` regenerates its
 figure via `$BENCH_PYTHON examples/settling_sphere/plot.py`; `cfd_ibm_fiber` regenerates
 its figure via `$BENCH_PYTHON examples/cfd_ibm_fiber/plot.py`; `fixed_bed_ergun`
-regenerates its figure via `$BENCH_PYTHON examples/fixed_bed_ergun/plot.py`. Graph
-backfill for the remaining bed case is tracked as follow-up (it currently reports
-PASS/FAIL numerically)._
+regenerates its figure via `$BENCH_PYTHON examples/fixed_bed_ergun/plot.py`;
+`implicit_added_mass` regenerates its figure via
+`$BENCH_PYTHON examples/implicit_added_mass/plot.py`. Graph backfill for the
+remaining bed case is tracked as follow-up (it currently reports PASS/FAIL
+numerically)._
