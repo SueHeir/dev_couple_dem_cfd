@@ -26,6 +26,8 @@ pub mod drag;
 pub mod reference;
 pub mod seam;
 
+pub use seam::DemCfdCouplingPlugin;
+
 /// Common imports for a case `main`.
 pub mod prelude {
     pub use crate::bed::{
@@ -40,6 +42,6 @@ pub mod prelude {
     pub use crate::seam::{
         bed_force, build_cfd_base, build_soil_bed, couple_two_way, export_kinematics, import_force,
         read_subapp_resource, set_seam_mode, set_superficial, with_subapp_resource, BodyAccel,
-        CouplePhase, FluidForces, ParticleSpec, SeamCtx, Superficial, R_GAS,
+        CouplePhase, DemCfdCouplingPlugin, FluidForces, ParticleSpec, SeamCtx, Superficial, R_GAS,
     };
 }

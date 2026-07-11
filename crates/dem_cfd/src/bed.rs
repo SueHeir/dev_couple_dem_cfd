@@ -14,9 +14,15 @@ use field_core::{FvMesh, StructuredMesh, UniformMesh, Vec3};
 pub fn axis_centers(mesh: &UniformMesh) -> ([Vec<f64>; 3], usize) {
     let [ni, nj, nk] = mesh.dims();
     let ng = mesh.n_ghost();
-    let xc = (0..ni).map(|i| mesh.cell_centroid(mesh.idx_raw(i + ng, ng, ng))[0]).collect();
-    let yc = (0..nj).map(|j| mesh.cell_centroid(mesh.idx_raw(ng, j + ng, ng))[1]).collect();
-    let zc = (0..nk).map(|k| mesh.cell_centroid(mesh.idx_raw(ng, ng, k + ng))[2]).collect();
+    let xc = (0..ni)
+        .map(|i| mesh.cell_centroid(mesh.idx_raw(i + ng, ng, ng))[0])
+        .collect();
+    let yc = (0..nj)
+        .map(|j| mesh.cell_centroid(mesh.idx_raw(ng, j + ng, ng))[1])
+        .collect();
+    let zc = (0..nk)
+        .map(|k| mesh.cell_centroid(mesh.idx_raw(ng, ng, k + ng))[2])
+        .collect();
     ([xc, yc, zc], ng)
 }
 

@@ -161,7 +161,8 @@ fn cfd_interphase_system(
     let mut drag_on_particle = vec![[0.0f64; 3]; parts.len()];
 
     for (i, p) in parts.iter().enumerate() {
-        let u_gas = coupling::sample_gas_velocity(&*mesh, &state, eos, p.center).unwrap_or([0.0; 3]);
+        let u_gas =
+            coupling::sample_gas_velocity(&*mesh, &state, eos, p.center).unwrap_or([0.0; 3]);
         let rho_f = coupling::sample_gas_density(&*mesh, &state, p.center).unwrap_or(0.0);
         let eps = coupling::sample_void_fraction(&*mesh, &eps_field, p.center).unwrap_or(1.0);
 
@@ -221,8 +222,11 @@ fn build_cfd(gas: &GasCfg, mesh_cfg: UniformMeshConfig, gz: f64, dt: f64) -> App
 }
 
 fn main() {
-    let path = std::env::args().nth(1).expect("usage: settling_sphere <case.toml>");
-    let toml_src = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("cannot read {path}: {e}"));
+    let path = std::env::args()
+        .nth(1)
+        .expect("usage: settling_sphere <case.toml>");
+    let toml_src =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("cannot read {path}: {e}"));
     let cfg = Config::from_str(&toml_src);
 
     let gas: GasCfg = cfg.section("gas");
@@ -238,23 +242,43 @@ fn main() {
 
     // Analytic references.
     let v_stokes = terminal_velocity_stokes(pc.density, gas.rho, pc.radius, grav.gz.abs(), gas.mu);
-    let v_balance = terminal_velocity(pc.density, gas.rho, pc.radius, grav.gz.abs(), gas.mu, cd_schiller_naumann);
+    let v_balance = terminal_velocity(
+        pc.density,
+        gas.rho,
+        pc.radius,
+        grav.gz.abs(),
+        gas.mu,
+        cd_schiller_naumann,
+    );
     let re_balance = particle_reynolds(gas.rho, v_balance, 2.0 * pc.radius, gas.mu);
 
     // A single settling particle is a one-element bed: reuse the generic SOIL side
     // and the four-phase two-way coupling scaffold from dem_cfd.
-    let soil = build_soil_bed(&[[pc.x0, pc.y0, pc.z0]], pc.radius, pc.density, grav.gz, run.dt);
+    let soil = build_soil_bed(
+        &[[pc.x0, pc.y0, pc.z0]],
+        pc.radius,
+        pc.density,
+        grav.gz,
+        run.dt,
+    );
     let cfd = build_cfd(&gas, mesh_cfg, grav.gz, run.dt);
     let mut parent = couple_two_way(soil, cfd, pc.radius);
 
     println!("# Single-sphere settling — unresolved DEM-CFD seam (Wen-Yu/Gidaspow drag)");
     println!(
         "# R = {:.3e} m   d = {:.3e} m   rho_p = {}   rho_f = {}   mu = {:.3e}",
-        pc.radius, 2.0 * pc.radius, pc.density, gas.rho, gas.mu
+        pc.radius,
+        2.0 * pc.radius,
+        pc.density,
+        gas.rho,
+        gas.mu
     );
     println!(
         "# m = {:.3e} kg   gz = {}   g_eff = {:.4}   tau = {:.3e} s",
-        mass, grav.gz, g_eff, mass / (6.0 * std::f64::consts::PI * gas.mu * pc.radius)
+        mass,
+        grav.gz,
+        g_eff,
+        mass / (6.0 * std::f64::consts::PI * gas.mu * pc.radius)
     );
     println!("# v_stokes = {v_stokes:.6}   v_balance(SN) = {v_balance:.6}   Re_balance = {re_balance:.4}");
     println!("# step        v_z [m/s]      |u_gas| [m/s]      Re");
@@ -281,7 +305,10 @@ fn main() {
 
     // Cleanup sub-Apps (no-op for these serial apps, but keep the contract).
     if let Some(cell) = parent.get_mut_resource(TypeId::of::<SubApps>()) {
-        cell.borrow_mut().downcast_mut::<SubApps>().unwrap().cleanup_all();
+        cell.borrow_mut()
+            .downcast_mut::<SubApps>()
+            .unwrap()
+            .cleanup_all();
     }
 
     let n = vz_samples.len().max(1) as f64;
@@ -300,27 +327,39 @@ fn main() {
             gas_mom[2] + drag_impulse[2],
         ];
         let dn = (diff[0].powi(2) + diff[1].powi(2) + diff[2].powi(2)).sqrt();
-        let sc = (drag_impulse[0].powi(2) + drag_impulse[1].powi(2) + drag_impulse[2].powi(2)).sqrt();
+        let sc =
+            (drag_impulse[0].powi(2) + drag_impulse[1].powi(2) + drag_impulse[2].powi(2)).sqrt();
         dn / sc.max(1e-30)
     };
 
     println!("#");
     println!("# ── result ─────────────────────────────────────────────");
-    println!("# v_terminal (last {:.0}%):  {v_term:.6} m/s", 100.0 * run.average_frac);
+    println!(
+        "# v_terminal (last {:.0}%):  {v_term:.6} m/s",
+        100.0 * run.average_frac
+    );
     println!(
         "# v_stokes (1851):          {v_stokes:.6} m/s   rel err {:.2}%  (tol {:.1}%)",
-        100.0 * rel_stokes, 100.0 * valid.tol_rel_stokes
+        100.0 * rel_stokes,
+        100.0 * valid.tol_rel_stokes
     );
-    println!("# terminal Re:              {last_re:.4}  (regime gate Re < {})", valid.re_max);
+    println!(
+        "# terminal Re:              {last_re:.4}  (regime gate Re < {})",
+        valid.re_max
+    );
     println!(
         "# force balance |F_f-mg|/mg: {:.2}%  (tol {:.1}%)",
-        100.0 * force_bal, 100.0 * valid.tol_force_balance
+        100.0 * force_bal,
+        100.0 * valid.tol_force_balance
     );
     println!(
         "# |u_gas| at particle:      {last_ugas:.3e} m/s  ({:.2}% of v_t)",
         100.0 * last_ugas / v_term.max(1e-30)
     );
-    println!("# momentum conservation err: {mom_err:.2e}  (tol {:.0e})", valid.tol_momentum);
+    println!(
+        "# momentum conservation err: {mom_err:.2e}  (tol {:.0e})",
+        valid.tol_momentum
+    );
 
     let pass_stokes = rel_stokes <= valid.tol_rel_stokes;
     let pass_re = last_re < valid.re_max;
@@ -344,13 +383,17 @@ fn main() {
 fn read_particle(parent: &App) -> (f64, f64, Vec3) {
     let subs = parent.get_resource_ref::<SubApps>().unwrap();
     let atom_cell = subs
-        .find("soil")
+        .find("dem")
         .unwrap()
         .resource_cell(TypeId::of::<Atom>())
         .unwrap()
         .borrow();
     let atoms = atom_cell.downcast_ref::<Atom>().unwrap();
-    let v = [atoms.vel[0][0] as f64, atoms.vel[0][1] as f64, atoms.vel[0][2] as f64];
+    let v = [
+        atoms.vel[0][0] as f64,
+        atoms.vel[0][1] as f64,
+        atoms.vel[0][2] as f64,
+    ];
     let vz = v[2];
     let speed = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
     drop(atom_cell);
@@ -376,15 +419,33 @@ fn gas_speed_at_particle(parent: &App) -> f64 {
     let subs = parent.get_resource_ref::<SubApps>().unwrap();
     let cfd = subs.find("cfd").unwrap();
 
-    let set_cell = cfd.resource_cell(TypeId::of::<ParticleSet>()).unwrap().borrow();
-    let Some(p) = set_cell.downcast_ref::<ParticleSet>().unwrap().particles.first().copied() else {
+    let set_cell = cfd
+        .resource_cell(TypeId::of::<ParticleSet>())
+        .unwrap()
+        .borrow();
+    let Some(p) = set_cell
+        .downcast_ref::<ParticleSet>()
+        .unwrap()
+        .particles
+        .first()
+        .copied()
+    else {
         return 0.0;
     };
     drop(set_cell);
 
-    let reg_cell = cfd.resource_cell(TypeId::of::<FieldRegistry>()).unwrap().borrow();
-    let mesh_cell = cfd.resource_cell(TypeId::of::<UniformMesh>()).unwrap().borrow();
-    let eos_cell = cfd.resource_cell(TypeId::of::<EosResource>()).unwrap().borrow();
+    let reg_cell = cfd
+        .resource_cell(TypeId::of::<FieldRegistry>())
+        .unwrap()
+        .borrow();
+    let mesh_cell = cfd
+        .resource_cell(TypeId::of::<UniformMesh>())
+        .unwrap()
+        .borrow();
+    let eos_cell = cfd
+        .resource_cell(TypeId::of::<EosResource>())
+        .unwrap()
+        .borrow();
     let reg = reg_cell.downcast_ref::<FieldRegistry>().unwrap();
     let mesh = mesh_cell.downcast_ref::<UniformMesh>().unwrap();
     let eos = &*eos_cell.downcast_ref::<EosResource>().unwrap().0;
@@ -399,8 +460,14 @@ fn read_momentum(parent: &App) -> (Vec3, Vec3) {
     let subs = parent.get_resource_ref::<SubApps>().unwrap();
     let cfd = subs.find("cfd").unwrap();
 
-    let reg_cell = cfd.resource_cell(TypeId::of::<FieldRegistry>()).unwrap().borrow();
-    let mesh_cell = cfd.resource_cell(TypeId::of::<UniformMesh>()).unwrap().borrow();
+    let reg_cell = cfd
+        .resource_cell(TypeId::of::<FieldRegistry>())
+        .unwrap()
+        .borrow();
+    let mesh_cell = cfd
+        .resource_cell(TypeId::of::<UniformMesh>())
+        .unwrap()
+        .borrow();
     let reg = reg_cell.downcast_ref::<FieldRegistry>().unwrap();
     let mesh = mesh_cell.downcast_ref::<UniformMesh>().unwrap();
     let state = reg.expect::<CfdState>("CfdState");
@@ -419,7 +486,10 @@ fn read_momentum(parent: &App) -> (Vec3, Vec3) {
     drop(reg_cell);
     drop(mesh_cell);
 
-    let imp_cell = cfd.resource_cell(TypeId::of::<DragImpulse>()).unwrap().borrow();
+    let imp_cell = cfd
+        .resource_cell(TypeId::of::<DragImpulse>())
+        .unwrap()
+        .borrow();
     let imp = imp_cell.downcast_ref::<DragImpulse>().unwrap().total;
     (mom, imp)
 }

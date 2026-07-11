@@ -7,6 +7,10 @@ repository = "https://github.com/SueHeir/dev_couple_dem_cfd"
 description = "Cross-substrate coupling: granular DEM (soil particles / dirt bonded clumps) <-> compressible CFD (dev_field_efvm) via grass_multi"
 publish = false
 
+[features]
+default = []
+resolved-ibm = ["dep:dirt_bond", "dep:dirt_atom"]
+
 # Own workspace root so cargo does not walk up into the sibling tier workspaces.
 # The reusable coupling layer lives in crates/dem_cfd; the examples ride on top.
 [workspace]
@@ -50,6 +54,10 @@ name = "settling_sphere"
 path = "examples/settling_sphere/main.rs"
 
 [[example]]
+name = "hello_dem_cfd"
+path = "examples/hello_dem_cfd/main.rs"
+
+[[example]]
 name = "fixed_bed_ergun"
 path = "examples/fixed_bed_ergun/main.rs"
 
@@ -68,6 +76,7 @@ path = "examples/implicit_added_mass/main.rs"
 [[example]]
 name = "cfd_ibm_fiber"
 path = "examples/cfd_ibm_fiber/main.rs"
+required-features = ["resolved-ibm"]
 
 [dependencies]
 dem_cfd.workspace = true
@@ -78,8 +87,8 @@ cfd_state.workspace = true
 cfd_boundary.workspace = true
 soil_core.workspace = true
 soil_verlet.workspace = true
-dirt_bond.workspace = true
-dirt_atom.workspace = true
+dirt_bond = { workspace = true, optional = true }
+dirt_atom = { workspace = true, optional = true }
 field_core.workspace = true
 grass_app.workspace = true
 grass_io.workspace = true

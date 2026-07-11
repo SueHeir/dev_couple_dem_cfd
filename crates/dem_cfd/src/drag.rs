@@ -39,7 +39,11 @@ pub struct SeamMode {
 
 impl Default for SeamMode {
     fn default() -> Self {
-        Self { macdonald: true, omit_pressure_grad: false, corrupt_eps_power: false }
+        Self {
+            macdonald: true,
+            omit_pressure_grad: false,
+            corrupt_eps_power: false,
+        }
     }
 }
 

@@ -34,6 +34,37 @@ interphase drag seam, and they compose two independently-developed tiers. So eac
 coupling gets its own `dev_couple_*` repo, depending on its two partner tiers and
 nothing more. (Its SPH sibling is [dev_couple_sph_cfd](https://github.com/SueHeir/dev_couple_sph_cfd).)
 
+## Start here: coupling is composition
+
+The validation programs are deliberately exhaustive; they are not the first
+thing a new reader should have to decipher. The runnable
+[`hello_dem_cfd`](examples/hello_dem_cfd/main.rs) lesson reduces the public idea
+to this:
+
+```rust
+let mut app = App::new();
+
+app.add_subapp("dem", setup::dem())
+    .add_subapp("cfd", setup::cfd())
+    .add_plugins(DemCfdCouplingPlugin::new(RADIUS, 200))
+    .start();
+```
+
+The DEM and CFD solvers remain ordinary GRASS Apps. The coupling plugin owns
+the order of operations—export particles, advance CFD, import fluid forces,
+advance DEM—not either solver. The CFD setup explicitly selects the physical
+exchange law; this lesson uses Wen–Yu/Gidaspow drag and applies the equal and
+opposite momentum sink to the gas. Swap that closure when the physics changes,
+without rewriting either solver or the parent schedule.
+
+```bash
+cargo run --release --example hello_dem_cfd
+```
+
+Read `main.rs` first. Its adjacent `setup.rs` is the second page of the lesson:
+the concrete mesh, particle, and drag law are visible there without burying the
+composition model.
+
 ## Structure — a reusable crate + thin examples
 
 The pieces every *unresolved* (Euler–Lagrange, void-fraction) DEM↔CFD simulation
@@ -69,6 +100,7 @@ regimes:
 
 | example | coupling | validates against |
 |---|---|---|
+| `hello_dem_cfd` | minimal composition lesson using point-particle drag | teaching example; validated closure reused below |
 | `settling_sphere` | point-particle drag (Wen–Yu/Gidaspow) | Stokes (1851) terminal velocity |
 | `fixed_bed_ergun` | packed-bed drag closure | Ergun (1952) pressure drop |
 | `fluidized_bed_umf` | DEM bed ↔ gas, bisection on net seam force | Wen & Yu (1966) minimum fluidization |

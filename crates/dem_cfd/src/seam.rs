@@ -10,11 +10,9 @@ use cfd_eos::{Eos, IdealGas, Viscosity};
 use cfd_ibm::coupling::{InterphaseForces, ParticleKinematics, ParticleSet};
 use cfd_solver::{CfdStatePlugin, IdealGasPlugin};
 use cfd_state::PrimVar;
-use field_core::{
-    FieldDefaultPlugins, UniformMeshConfig, Vec3,
-};
+use field_core::{FieldDefaultPlugins, UniformMeshConfig, Vec3};
 use grass_app::prelude::*;
-use grass_multi::{tick_subapp, Multi, MultiAppExt, SubApps};
+use grass_multi::{tick_subapp, Multi, MultiAppExt, OuterIterStopPlugin, SubApps};
 use grass_scheduler::prelude::*;
 use grass_scheduler::{Res, ResMut};
 use soil_core::{Atom, ParticleSimScheduleSet};
@@ -142,6 +140,7 @@ pub enum CouplePhase {
     TickCfd,
     Import,
     TickSoil,
+    Check,
 }
 impl ScheduleSet for CouplePhase {
     fn to_index(&self) -> u32 {
@@ -150,6 +149,7 @@ impl ScheduleSet for CouplePhase {
             Self::TickCfd => 1,
             Self::Import => 2,
             Self::TickSoil => 3,
+            Self::Check => 4,
         }
     }
     fn name(&self) -> &'static str {
@@ -158,20 +158,29 @@ impl ScheduleSet for CouplePhase {
             Self::TickCfd => "TickCfd",
             Self::Import => "Import",
             Self::TickSoil => "TickSoil",
+            Self::Check => "Check",
         }
     }
 }
 
 /// SOIL→FIELD: hand the (moving) bed kinematics across each step.
 pub fn export_kinematics(world: Multi, spec: Res<ParticleSpec>) {
-    let atoms = world.expect_read::<Atom>("soil");
+    let atoms = world.expect_read::<Atom>("dem");
     let n = atoms.nlocal as usize;
     let mut set = world.expect_write::<ParticleSet>("cfd");
     set.particles.clear();
     for i in 0..n {
         set.particles.push(ParticleKinematics {
-            center: [atoms.pos[i][0] as f64, atoms.pos[i][1] as f64, atoms.pos[i][2] as f64],
-            velocity: [atoms.vel[i][0] as f64, atoms.vel[i][1] as f64, atoms.vel[i][2] as f64],
+            center: [
+                atoms.pos[i][0] as f64,
+                atoms.pos[i][1] as f64,
+                atoms.pos[i][2] as f64,
+            ],
+            velocity: [
+                atoms.vel[i][0] as f64,
+                atoms.vel[i][1] as f64,
+                atoms.vel[i][2] as f64,
+            ],
             radius: spec.radius,
         });
     }
@@ -182,7 +191,57 @@ pub fn import_force(world: Multi) {
     let forces = world.expect_read::<InterphaseForces>("cfd");
     let v = forces.force.clone();
     drop(forces);
-    world.expect_write::<FluidForces>("soil").f = v;
+    world.expect_write::<FluidForces>("dem").f = v;
+}
+
+/// The standard dynamic unresolved DEM↔CFD coupling loop.
+///
+/// Add the independently configured DEM and CFD solvers as the `"dem"` and
+/// `"cfd"` sub-Apps, then add this plugin to the parent. The plugin owns only
+/// orchestration: particle export, CFD advancement, force import, DEM
+/// advancement, termination, and sub-App cleanup. The CFD sub-App still owns
+/// the selected physical closure (for example Wen–Yu/Gidaspow drag).
+pub struct DemCfdCouplingPlugin {
+    /// Radius exported with every DEM particle.
+    pub particle_radius: f64,
+    /// Number of coupled outer steps executed by [`App::start`].
+    pub steps: u32,
+}
+
+impl DemCfdCouplingPlugin {
+    /// Construct a coupling loop for equal-radius particles.
+    pub fn new(particle_radius: f64, steps: u32) -> Self {
+        assert!(particle_radius > 0.0, "particle radius must be positive");
+        assert!(steps > 0, "coupling steps must be positive");
+        Self {
+            particle_radius,
+            steps,
+        }
+    }
+}
+
+impl Plugin for DemCfdCouplingPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_resource(ParticleSpec {
+            radius: self.particle_radius,
+        });
+        app.add_update_system(export_kinematics, CouplePhase::Export);
+        app.add_update_system(tick_subapp("cfd", 1), CouplePhase::TickCfd);
+        app.add_update_system(import_force, CouplePhase::Import);
+        app.add_update_system(tick_subapp("dem", 1), CouplePhase::TickSoil);
+        app.add_plugins(OuterIterStopPlugin {
+            n_iters: self.steps,
+            phase: CouplePhase::Check,
+        });
+        app.add_cleanup_with_app(|parent| {
+            if let Some(cell) = parent.get_mut_resource(TypeId::of::<SubApps>()) {
+                cell.borrow_mut()
+                    .downcast_mut::<SubApps>()
+                    .expect("SubApps resource type")
+                    .cleanup_all();
+            }
+        });
+    }
 }
 
 /// Assemble the parent App for a dynamic two-way coupling: mount the two sub-Apps
@@ -190,13 +249,15 @@ pub fn import_force(world: Multi) {
 /// Returns the prepared parent, ready to `update()`.
 pub fn couple_two_way(soil: App, cfd: App, radius: f64) -> App {
     let mut parent = App::new();
-    parent.add_subapp("soil", soil);
+    parent.add_subapp("dem", soil);
     parent.add_subapp("cfd", cfd);
+    // Manual drivers own their loop and cleanup, so wire only the four phases
+    // here. New self-driving examples should prefer DemCfdCouplingPlugin.
     parent.add_resource(ParticleSpec { radius });
     parent.add_update_system(export_kinematics, CouplePhase::Export);
     parent.add_update_system(tick_subapp("cfd", 1), CouplePhase::TickCfd);
     parent.add_update_system(import_force, CouplePhase::Import);
-    parent.add_update_system(tick_subapp("soil", 1), CouplePhase::TickSoil);
+    parent.add_update_system(tick_subapp("dem", 1), CouplePhase::TickSoil);
     parent.prepare();
     parent
 }
@@ -206,14 +267,23 @@ pub fn couple_two_way(soil: App, cfd: App, radius: f64) -> App {
 /// Mutate a resource of type `T` on the named sub-App from the driver.
 pub fn with_subapp_resource<T: 'static>(parent: &App, sub: &str, f: impl FnOnce(&mut T)) {
     let subs = parent.get_resource_ref::<SubApps>().unwrap();
-    let cell = subs.find(sub).unwrap().resource_cell(TypeId::of::<T>()).unwrap();
+    let cell = subs
+        .find(sub)
+        .unwrap()
+        .resource_cell(TypeId::of::<T>())
+        .unwrap();
     f(cell.borrow_mut().downcast_mut::<T>().unwrap());
 }
 
 /// Read a `Copy` resource of type `T` from the named sub-App.
 pub fn read_subapp_resource<T: Copy + 'static>(parent: &App, sub: &str) -> T {
     let subs = parent.get_resource_ref::<SubApps>().unwrap();
-    let cell = subs.find(sub).unwrap().resource_cell(TypeId::of::<T>()).unwrap().borrow();
+    let cell = subs
+        .find(sub)
+        .unwrap()
+        .resource_cell(TypeId::of::<T>())
+        .unwrap()
+        .borrow();
     *cell.downcast_ref::<T>().unwrap()
 }
 
