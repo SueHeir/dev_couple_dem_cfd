@@ -6,16 +6,21 @@
 
 use std::any::TypeId;
 
-use cfd_eos::{Eos, IdealGas, Viscosity};
-use cfd_ibm::coupling::{InterphaseForces, ParticleKinematics, ParticleSet};
+use cfd_eos::{Eos, EosResource, IdealGas, Viscosity};
+use cfd_ibm::coupling::{
+    self, beta_gidaspow, cd_schiller_naumann, deposit_void_fraction, particle_reynolds,
+    InterphaseForces, ParticleKinematics, ParticleSet,
+};
 use cfd_solver::{CfdStatePlugin, IdealGasPlugin};
-use cfd_state::PrimVar;
-use field_core::{FieldDefaultPlugins, UniformMeshConfig, Vec3};
+use cfd_state::{CfdState, PrimVar};
+use field_core::{
+    FieldDefaultPlugins, FieldRegistry, MeshScheduleSet, UniformMesh, UniformMeshConfig, Vec3,
+};
 use grass_app::prelude::*;
 use grass_multi::{tick_subapp, Multi, MultiAppExt, OuterIterStopPlugin, SubApps};
 use grass_scheduler::prelude::*;
 use grass_scheduler::{Res, ResMut};
-use soil_core::{Atom, ParticleSimScheduleSet};
+use soil_core::{Accum, Atom, ParticleSimScheduleSet};
 use soil_verlet::VelocityVerletPlugin;
 
 use crate::config::GasCfg;
@@ -110,6 +115,80 @@ pub fn bed_force(mut atoms: ResMut<Atom>, ff: Res<FluidForces>, body: Res<BodyAc
     }
 }
 
+/// Add the imported fluid force to whatever forces the standalone DEM solver
+/// already computes (gravity, contacts, bonds, constraints, ...).
+pub fn add_fluid_force(mut atoms: ResMut<Atom>, ff: Res<FluidForces>) {
+    for i in 0..atoms.nlocal as usize {
+        let f = ff.f.get(i).copied().unwrap_or([0.0; 3]);
+        atoms.force[i][0] += f[0] as Accum;
+        atoms.force[i][1] += f[1] as Accum;
+        atoms.force[i][2] += f[2] as Accum;
+    }
+}
+
+/// Point-particle Wen–Yu/Gidaspow exchange installed into the CFD sub-App by
+/// [`DemCfdCouplingPlugin`]. It deposits void fraction, samples local gas state,
+/// computes drag and buoyancy, and applies the equal-and-opposite gas momentum
+/// sink.
+#[allow(clippy::too_many_arguments)]
+pub fn point_particle_exchange(
+    mesh: Res<UniformMesh>,
+    reg: Res<FieldRegistry>,
+    eos: Res<EosResource>,
+    ctx: Res<SeamCtx>,
+    particles: Res<ParticleSet>,
+    mut forces: ResMut<InterphaseForces>,
+) {
+    let eos: &dyn Eos = &*eos.0;
+    let mut state = reg.expect_mut::<CfdState>("CfdState not registered");
+    forces.reset(particles.particles.len());
+    let void_fraction = deposit_void_fraction(&*mesh, &particles.particles, 1e-3);
+    let mut drag_reaction = vec![[0.0; 3]; particles.particles.len()];
+
+    for (i, particle) in particles.particles.iter().enumerate() {
+        let gas_velocity =
+            coupling::sample_gas_velocity(&*mesh, &state, eos, particle.center).unwrap_or([0.0; 3]);
+        let rho = coupling::sample_gas_density(&*mesh, &state, particle.center).unwrap_or(ctx.rho);
+        let eps =
+            coupling::sample_void_fraction(&*mesh, &void_fraction, particle.center).unwrap_or(1.0);
+        let slip = [
+            gas_velocity[0] - particle.velocity[0],
+            gas_velocity[1] - particle.velocity[1],
+            gas_velocity[2] - particle.velocity[2],
+        ];
+        let speed = slip.iter().map(|x| x * x).sum::<f64>().sqrt();
+        let reynolds = particle_reynolds(rho, speed, particle.diameter(), ctx.mu) * eps;
+        let beta = beta_gidaspow(
+            eps,
+            rho,
+            ctx.mu,
+            particle.diameter(),
+            speed,
+            cd_schiller_naumann(reynolds.max(1e-12)),
+        );
+        let drag = coupling::drag_force_from_beta(beta, particle.volume(), eps, slip);
+        let buoyancy = [
+            -rho * particle.volume() * ctx.g[0],
+            -rho * particle.volume() * ctx.g[1],
+            -rho * particle.volume() * ctx.g[2],
+        ];
+        forces.force[i] = [
+            drag[0] + buoyancy[0],
+            drag[1] + buoyancy[1],
+            drag[2] + buoyancy[2],
+        ];
+        drag_reaction[i] = drag;
+    }
+
+    coupling::apply_momentum_sink(
+        &*mesh,
+        &mut state,
+        &particles.particles,
+        &drag_reaction,
+        ctx.dt,
+    );
+}
+
 /// Build an integrated (velocity-Verlet) SOIL bed of equal spheres at `positions`.
 pub fn build_soil_bed(positions: &[[f64; 3]], radius: f64, density: f64, gz: f64, dt: f64) -> App {
     let mut atoms = Atom::new();
@@ -196,32 +275,80 @@ pub fn import_force(world: Multi) {
 
 /// The standard dynamic unresolved DEM↔CFD coupling loop.
 ///
-/// Add the independently configured DEM and CFD solvers as the `"dem"` and
-/// `"cfd"` sub-Apps, then add this plugin to the parent. The plugin owns only
-/// orchestration: particle export, CFD advancement, force import, DEM
-/// advancement, termination, and sub-App cleanup. The CFD sub-App still owns
-/// the selected physical closure (for example Wen–Yu/Gidaspow drag).
+/// Add independently configured DEM and CFD solvers as the `"dem"` and `"cfd"`
+/// sub-Apps, then add this plugin to the parent. Neither solver needs coupling
+/// code. Before either is prepared, the plugin installs the seam resources and
+/// systems into both Apps. It then owns particle export, Wen–Yu/Gidaspow force
+/// exchange, the equal-and-opposite gas momentum sink, fluid-force addition on
+/// the DEM side, solver advancement, termination, and cleanup.
 pub struct DemCfdCouplingPlugin {
     /// Radius exported with every DEM particle.
     pub particle_radius: f64,
     /// Number of coupled outer steps executed by [`App::start`].
     pub steps: u32,
+    /// Carrier density used if a particle lies outside the sampled mesh.
+    pub gas_density: f64,
+    /// Dynamic viscosity used by the point-particle closure.
+    pub gas_viscosity: f64,
+    /// Body acceleration used for generalized buoyancy.
+    pub gravity: Vec3,
+    /// Coupling timestep used by the equal-and-opposite gas momentum sink.
+    pub dt: f64,
 }
 
 impl DemCfdCouplingPlugin {
     /// Construct a coupling loop for equal-radius particles.
-    pub fn new(particle_radius: f64, steps: u32) -> Self {
+    pub fn new(
+        particle_radius: f64,
+        steps: u32,
+        dt: f64,
+        gas_density: f64,
+        gas_viscosity: f64,
+        gravity: Vec3,
+    ) -> Self {
         assert!(particle_radius > 0.0, "particle radius must be positive");
         assert!(steps > 0, "coupling steps must be positive");
+        assert!(dt > 0.0, "coupling timestep must be positive");
+        assert!(gas_density > 0.0, "gas density must be positive");
+        assert!(gas_viscosity > 0.0, "gas viscosity must be positive");
         Self {
             particle_radius,
             steps,
+            gas_density,
+            gas_viscosity,
+            gravity,
+            dt,
         }
+    }
+
+    /// Convenience constructor for the teaching case's room-temperature air
+    /// (`rho = 1.2 kg/m³`, `mu = 1.8e-5 Pa·s`). Production cases should use
+    /// [`new`](Self::new) with properties matching their CFD state.
+    pub fn for_air(particle_radius: f64, steps: u32, dt: f64, gravity: Vec3) -> Self {
+        Self::new(particle_radius, steps, dt, 1.2, 1.8e-5, gravity)
     }
 }
 
 impl Plugin for DemCfdCouplingPlugin {
     fn build(&self, app: &mut App) {
+        let ctx = SeamCtx {
+            mu: self.gas_viscosity,
+            rho: self.gas_density,
+            eps: 1.0,
+            g: self.gravity,
+            dt: self.dt,
+            mode: SeamMode::default(),
+        };
+        app.configure_subapp("dem", |dem| {
+            dem.add_resource(FluidForces::default());
+            dem.add_update_system(add_fluid_force, ParticleSimScheduleSet::Force);
+        });
+        app.configure_subapp("cfd", |cfd| {
+            cfd.add_resource(ctx);
+            cfd.add_resource(ParticleSet::default());
+            cfd.add_resource(InterphaseForces::default());
+            cfd.add_update_system(point_particle_exchange, MeshScheduleSet::Output);
+        });
         app.add_resource(ParticleSpec {
             radius: self.particle_radius,
         });

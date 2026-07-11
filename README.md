@@ -46,24 +46,27 @@ let mut app = App::new();
 
 app.add_subapp("dem", setup::dem())
     .add_subapp("cfd", setup::cfd())
-    .add_plugins(DemCfdCouplingPlugin::new(RADIUS, 200))
+    .add_plugins(DemCfdCouplingPlugin::for_air(RADIUS, 200, DT, GRAVITY))
     .start();
 ```
 
-The DEM and CFD solvers remain ordinary GRASS Apps. The coupling plugin owns
-the order of operations—export particles, advance CFD, import fluid forces,
-advance DEM—not either solver. The CFD setup explicitly selects the physical
-exchange law; this lesson uses Wen–Yu/Gidaspow drag and applies the equal and
-opposite momentum sink to the gas. Swap that closure when the physics changes,
-without rewriting either solver or the parent schedule.
+Only a few lines? Not really: `DemCfdCouplingPlugin` does the heavy lifting.
+The important point is that `setup::dem()` is a standalone gravity-driven DEM
+App and `setup::cfd()` is a standalone CFD App. Neither was edited for coupling,
+and neither knows the other exists.
+
+When the plugin is added, it configures both sub-Apps before either starts. It
+adds the particle export and fluid-force input to DEM; adds particle input,
+Wen–Yu/Gidaspow exchange, and the equal-and-opposite momentum sink to CFD; and
+owns the coupled execution schedule. All knowledge of the seam lives in the
+coupling plugin.
 
 ```bash
 cargo run --release --example hello_dem_cfd
 ```
 
-Read `main.rs` first. Its adjacent `setup.rs` is the second page of the lesson:
-the concrete mesh, particle, and drag law are visible there without burying the
-composition model.
+Read `main.rs` first. Its adjacent `setup.rs` contains only the two ordinary
+solver setups, making the absence of coupling knowledge directly inspectable.
 
 ## Structure — a reusable crate + thin examples
 

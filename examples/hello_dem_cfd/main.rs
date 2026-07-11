@@ -6,13 +6,14 @@ mod setup;
 use dem_cfd::DemCfdCouplingPlugin;
 use grass_app::prelude::*;
 use grass_multi::MultiAppExt;
+use setup::{DT, GRAVITY, RADIUS};
 
 fn main() {
     let mut app = App::new();
 
     app.add_subapp("dem", setup::dem())
         .add_subapp("cfd", setup::cfd())
-        .add_plugins(DemCfdCouplingPlugin::new(setup::RADIUS, 200))
+        .add_plugins(DemCfdCouplingPlugin::for_air(RADIUS, 200, DT, GRAVITY))
         .start();
 
     println!(
