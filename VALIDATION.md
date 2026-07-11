@@ -46,6 +46,8 @@ Minimum fluidization velocity measured by **bisection on the live net seam force
 DEM bed, cross-checked against Wen & Yu, with Ergun/MacDonald exact-balance brackets and
 two negative controls (omit-∇P, ε-power bug).
 
+![fluidized bed minimum fluidization validation](examples/fluidized_bed_umf/plots/umf_validation.png)
+
 | observable | measured | reference | rel. err | tol |
 |---|---|---|---|---|
 | `U_mf` (seam, live bisection) | 0.5138 m/s | Wen & Yu 0.5380 m/s | **4.51 %** | 15 % |
@@ -109,11 +111,9 @@ drag anisotropy of a slender body vs Tirado–García de la Torre, with a single
 
 ---
 
-_Figures are committed under `examples/<name>/plots/`. `settling_sphere` regenerates its
-figure via `$BENCH_PYTHON examples/settling_sphere/plot.py`; `cfd_ibm_fiber` regenerates
-its figure via `$BENCH_PYTHON examples/cfd_ibm_fiber/plot.py`; `fixed_bed_ergun`
-regenerates its figure via `$BENCH_PYTHON examples/fixed_bed_ergun/plot.py`;
-`implicit_added_mass` regenerates its figure via
-`$BENCH_PYTHON examples/implicit_added_mass/plot.py`. Graph backfill for the
-remaining bed case is tracked as follow-up (it currently reports PASS/FAIL
-numerically)._
+_Figures are committed under `examples/<name>/plots/`. Regenerate them with
+`$BENCH_PYTHON examples/settling_sphere/plot.py`,
+`$BENCH_PYTHON examples/fixed_bed_ergun/plot.py`,
+`$BENCH_PYTHON examples/fluidized_bed_umf/plot.py`,
+`$BENCH_PYTHON examples/cfd_ibm_fiber/plot.py`, and
+`$BENCH_PYTHON examples/implicit_added_mass/plot.py`._
