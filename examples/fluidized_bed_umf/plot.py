@@ -1,104 +1,129 @@
 #!/usr/bin/env python3
-"""Run fluidized_bed_umf and plot the measured U_mf validation gate.
+"""Run fluidized_bed_umf and plot the U_mf validation gate.
 
     $BENCH_PYTHON examples/fluidized_bed_umf/plot.py
 
-The plot is regenerated from the example's own output: the live seam bisection,
-the dynamic a_z zero crossing, the Wen-Yu reference, and the two negative controls.
+The figure is regenerated from the existing demo stdout: measured bed acceleration
+versus superficial velocity, the live-seam U_mf, the Wen & Yu reference, the 15%
+pass band, and the negative-control U_mf shifts.
 """
+from __future__ import annotations
+
 import re
 import subprocess
 import sys
 from pathlib import Path
+
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 CFG = "examples/fluidized_bed_umf/config.toml"
 
 
-def run():
-    out = subprocess.run(
+def run() -> str:
+    proc = subprocess.run(
         ["cargo", "run", "--release", "--example", "fluidized_bed_umf", "--", CFG],
         cwd=ROOT,
         capture_output=True,
         text=True,
     )
-    text = out.stdout + out.stderr
-    if out.returncode != 0:
-        sys.stderr.write(text)
-        sys.exit(out.returncode)
+    text = proc.stdout + proc.stderr
+    if proc.returncode != 0:
+        print(text)
+        sys.exit(proc.returncode)
     return text
 
 
-def main():
+def grab(text: str, pattern: str) -> float:
+    match = re.search(pattern, text)
+    if not match:
+        sys.exit(f"could not parse pattern: {pattern}")
+    return float(match.group(1))
+
+
+def parse(text: str) -> dict[str, object]:
+    row_re = re.compile(
+        r"^\s*([0-9.]+)\s+([0-9.]+)\s+([-0-9.]+)\s+([-0-9.]+)\s+([0-9.]+)\s+",
+        re.MULTILINE,
+    )
+    rows = [
+        {
+            "u": float(u),
+            "re": float(re_p),
+            "a_meas": float(a_meas),
+            "a_force": float(a_force),
+            "handoff": float(handoff),
+        }
+        for u, re_p, a_meas, a_force, handoff in row_re.findall(text)
+    ]
+    if not rows:
+        sys.exit("could not parse U/a_z sweep rows from fluidized_bed_umf output")
+
+    return {
+        "passed": "VALIDATION: PASS" in text,
+        "rows": rows,
+        "u_wy": grab(text, r"U_mf Wen&Yu \(1966\) REFERENCE:\s+([0-9.]+)"),
+        "u_seam": grab(text, r"U_mf MEASURED .*:\s+([0-9.]+)"),
+        "u_dyn": grab(text, r"U_mf DYNAMIC .*:\s+([0-9.]+)"),
+        "rel_err": grab(text, r"rel\.err\s+([0-9.]+)%"),
+        "tol": grab(text, r"rel\.err\s+[0-9.]+%\s+\(tol\s+([0-9.]+)%\)") / 100.0,
+        "u_nopg": grab(text, r"omit-∇P U_mf\s+([0-9.]+)"),
+        "u_epsbug": grab(text, r"eps-power-bug U_mf\s+([0-9.]+)"),
+        "handoff_worst": grab(text, r"worst \|a_z_meas .* =\s+([0-9.]+)"),
+    }
+
+
+def main() -> None:
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    text = run()
-    u_meas = _grab(text, r"U_mf MEASURED .*: ([\d.]+) m/s")
-    u_ref = _grab(text, r"U_mf Wen&Yu .*: +([\d.]+) m/s")
-    rel_err = _grab(text, r"rel\.err ([\d.]+)%")
-    tol = _grab(text, r"rel\.err [\d.]+% +\(tol ([\d.]+)%\)") / 100.0
-    u_dyn = _grab(text, r"U_mf DYNAMIC .*: +([\d.]+) m/s", required=False)
-    u_nopg = _grab(text, r"negative controls: omit-\S+ U_mf ([\d.]+)")
-    u_epsbug = _grab(text, r"eps-power-bug U_mf ([\d.]+)")
-    passed = "VALIDATION: PASS" in text
+    data = parse(run())
+    rows = data["rows"]
+    u = [row["u"] for row in rows]
+    a_meas = [row["a_meas"] for row in rows]
+    a_force = [row["a_force"] for row in rows]
+    u_wy = data["u_wy"]
+    u_seam = data["u_seam"]
+    u_dyn = data["u_dyn"]
+    tol = data["tol"]
 
-    labels = ["full seam\nbisection", "omit grad-P\ncontrol", "eps-power\ncontrol"]
-    values = [u_meas, u_nopg, u_epsbug]
-    colors = ["#1f77b4", "#d62728", "#d62728"]
-
-    fig, ax = plt.subplots(figsize=(7.2, 4.4))
-    ax.axhspan(
-        u_ref * (1.0 - tol),
-        u_ref * (1.0 + tol),
-        color="#2ca02c",
-        alpha=0.16,
-        label=f"pass band: Wen-Yu +/- {tol * 100:.0f}%",
+    fig, ax = plt.subplots(figsize=(7.6, 4.8))
+    ax.plot(u, a_meas, "o-", lw=2.0, ms=5, color="#1f77b4", label="integrated bed a_z")
+    ax.plot(u, a_force, "s--", lw=1.5, ms=4, color="#2ca02c", label="net seam force / M_bed")
+    ax.axhline(0.0, color="black", lw=1.0)
+    ax.axvspan(
+        u_wy * (1.0 - tol),
+        u_wy * (1.0 + tol),
+        color="0.88",
+        label=f"Wen & Yu ±{100.0 * tol:.0f}% gate",
     )
-    ax.axhline(u_ref, color="#2ca02c", lw=1.6, ls="--", label=f"Wen-Yu reference {u_ref:.4f} m/s")
-    bars = ax.bar(labels, values, color=colors, alpha=0.82)
-    bars[0].set_label(f"live seam bisection {u_meas:.4f} m/s")
-    if u_dyn is not None:
-        ax.scatter([0], [u_dyn], marker="D", s=55, color="#ff7f0e", zorder=4, label=f"dynamic onset {u_dyn:.4f} m/s")
-
-    for bar, value in zip(bars, values):
-        ax.text(
-            bar.get_x() + bar.get_width() / 2.0,
-            value + 0.025,
-            f"{value:.4f}",
-            ha="center",
-            va="bottom",
-            fontsize=8,
-        )
-
-    ax.set_ylabel("minimum fluidization velocity U_mf [m/s]")
+    ax.axvline(u_wy, color="black", ls="--", lw=1.4, label="Wen & Yu reference")
+    ax.axvline(u_seam, color="#d62728", lw=1.7, label="live seam U_mf")
+    ax.plot([u_dyn], [0.0], marker="x", ms=9, mew=2, color="#d62728", label="dynamic zero crossing")
+    ax.axvline(data["u_nopg"], color="#7f3c8d", ls=":", lw=1.4, label="omit-grad-P control")
+    ax.axvline(data["u_epsbug"], color="#ff7f0e", ls=":", lw=1.4, label="epsilon-power control")
+    ax.set_xlabel("superficial velocity U [m/s]")
+    ax.set_ylabel("bed acceleration a_z [m/s^2]")
+    status = "PASS" if data["passed"] else "FAIL"
     ax.set_title(
-        "fluidized_bed_umf - live U_mf bisection vs Wen-Yu\n"
-        + ("PASS" if passed else "FAIL")
-        + f"  ({rel_err:.2f}% error, tolerance {tol * 100:.0f}%)"
+        "fluidized_bed_umf: live DEM-CFD U_mf vs Wen & Yu\n"
+        f"{status}: seam {u_seam:.4f} m/s vs reference {u_wy:.4f} m/s "
+        f"({data['rel_err']:.2f}% error)"
     )
-    ax.set_ylim(0.0, max(values + [u_ref * (1.0 + tol)]) * 1.18)
-    ax.grid(True, axis="y", alpha=0.3)
+    ax.grid(True, alpha=0.28)
     ax.legend(loc="upper left", fontsize=8)
     fig.tight_layout()
 
     outdir = HERE / "plots"
     outdir.mkdir(exist_ok=True)
-    dst = outdir / "umf_validation.png"
-    fig.savefig(dst, dpi=130)
-    print(f"wrote {dst}  ({'PASS' if passed else 'FAIL'})")
-
-
-def _grab(text, pat, required=True):
-    m = re.search(pat, text)
-    if not m:
-        if required:
-            sys.exit(f"could not parse {pat!r} from run output")
-        return None
-    return float(m.group(1))
+    dst = outdir / "umf_wen_yu.png"
+    fig.savefig(dst, dpi=150)
+    print(
+        f"wrote {dst}  ({status}: U_mf {u_seam:.4f} vs Wen&Yu {u_wy:.4f}, "
+        f"err {data['rel_err']:.2f}%, handoff {data['handoff_worst']:.4f})"
+    )
 
 
 if __name__ == "__main__":

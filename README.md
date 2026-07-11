@@ -4,6 +4,10 @@
 > This code was fully written via **Claude 4.6,4.8 and Fable 5**, and stands as a proof of concept for a **bevy-like** ecosystem for physics simulation research, with the goal of testing if one scheduler/framework (**GRASS**) works for most scientific codes. **SOIL** and **FIELD** are particle- and mesh-based substrates for physics such as **DIRT** (DEM) or **dev_field_efvm**. Note that all other physics based repos I have start with **dev_**, as I do **NOT** know these methods. Please read, evaluate, use with a grain of salt, I have not personally read or reviewed everything here.
 <!-- /disclaimer-banner -->
 
+![fluidized bed U_mf versus Wen & Yu](examples/fluidized_bed_umf/plots/umf_wen_yu.png)
+
+Figure: `fluidized_bed_umf` PASS. The DEM-CFD seam gives `U_mf = 0.5138 m/s`
+versus Wen & Yu `0.5380 m/s`, a `4.51%` relative error inside the `15%` gate.
 
 A **cross-substrate coupling**: it joins the granular **DEM** side — SOIL particles
 ([soil](https://github.com/SueHeir/soil)) and, for bonded bodies, DIRT's bond model
@@ -85,6 +89,11 @@ cargo run --release --example cfd_ibm_fiber      -- examples/cfd_ibm_fiber/confi
 ## Validation
 
 See [VALIDATION.md](VALIDATION.md) for the measured-vs-reference results and figures.
+The fluidized-bed gate compares the live DEM-CFD minimum-fluidization velocity
+against Wen & Yu:
+
+![fluidized bed U_mf versus Wen & Yu](examples/fluidized_bed_umf/plots/umf_wen_yu.png)
+
 The settling-sphere gate relaxes onto the Stokes / Schiller–Naumann terminal velocity
 through the live drag seam:
 
