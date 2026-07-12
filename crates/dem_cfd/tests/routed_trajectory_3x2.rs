@@ -27,7 +27,7 @@
 
 #![cfg(feature = "mpi-routing")]
 
-use std::any::TypeId;
+use std::any::{Any, TypeId};
 use std::collections::{BTreeMap, BTreeSet};
 use std::process::Command;
 
@@ -45,7 +45,7 @@ use field_core::{UniformMesh, UniformMeshConfig};
 use grass_app::App;
 use grass_mpi::{CommBackend, MpiCommBackend};
 use grass_multi::{CoupledPairRunner, CouplingEpoch, RoleLaunch};
-use soil_core::{Atom, AtomDataRegistry, ParticlePartitionDirectory, ParticleStore};
+use soil_core::{Atom, AtomData, AtomDataRegistry, ParticlePartitionDirectory, ParticleStore};
 
 const CHILD_ENV: &str = "DEM_CFD_ROUTED_TRAJECTORY_CHILD";
 const STEPS: u64 = 320;
@@ -74,6 +74,27 @@ const CONFIG: &str = r#"
     name = "cfd"
     ranks = 2
 "#;
+
+#[derive(Default)]
+struct MigrationMarker(Vec<f64>);
+
+impl AtomData for MigrationMarker {
+    fn as_any(&self) -> &dyn Any { self }
+    fn as_any_mut(&mut self) -> &mut dyn Any { self }
+    fn snapshot(&self) -> Box<dyn AtomData> { Box::new(Self(self.0.clone())) }
+    fn len(&self) -> usize { self.0.len() }
+    fn push_default(&mut self) { self.0.push(-1.0); }
+    fn truncate(&mut self, n: usize) { self.0.truncate(n); }
+    fn swap_remove(&mut self, i: usize) { self.0.swap_remove(i); }
+    fn pack(&self, i: usize, buf: &mut Vec<f64>) { buf.push(self.0[i]); }
+    fn unpack(&mut self, buf: &[f64]) -> usize { self.0.push(buf[0]); 1 }
+    fn apply_permutation(&mut self, permutation: &[usize], n: usize) {
+        let old = self.0[..n].to_vec();
+        for (destination, &source) in permutation.iter().enumerate() {
+            self.0[destination] = old[source];
+        }
+    }
+}
 
 fn mesh_config() -> UniformMeshConfig {
     UniformMeshConfig {
@@ -136,6 +157,17 @@ fn build_dem(rank: i32) -> App {
             atoms.vel[i] = velocity.map(|x| x as _);
         }
     });
+    {
+        let atoms = app.get_resource_ref::<Atom>().unwrap();
+        let markers = atoms.tag.iter().map(|&tag| tag as f64 + 0.25).collect();
+        let count = atoms.nlocal as usize;
+        drop(atoms);
+        borrow_mut::<AtomDataRegistry>(&app, |registry| {
+            registry
+                .try_register(MigrationMarker(markers), count)
+                .unwrap();
+        });
+    }
     app.prepare();
     app
 }
@@ -424,6 +456,15 @@ fn framed_record_count(payload: &[f64]) -> usize {
     count
 }
 
+fn assert_extension_follows_stable_id(app: &App) {
+    let atoms = app.get_resource_ref::<Atom>().unwrap();
+    let registry = app.get_resource_ref::<AtomDataRegistry>().unwrap();
+    let marker = registry.expect::<MigrationMarker>("migration marker");
+    for i in 0..atoms.nlocal as usize {
+        assert_eq!(marker.0[i], atoms.tag[i] as f64 + 0.25);
+    }
+}
+
 fn run_role(launch: RoleLaunch) {
     let role = launch.role().to_owned();
     let exchange = launch.into_routed_exchange();
@@ -543,6 +584,7 @@ fn run_role(launch: RoleLaunch) {
             }
             // Migrate any atom that drifted out of this rank's ownership slab.
             dem_migrations += migrate_dem_atoms(&app, &solver_comm) as f64;
+            assert_extension_follows_stable_id(&app);
         } else {
             assert!(incoming.is_empty());
         }
