@@ -4,7 +4,7 @@
 //!
 //! The mesh is split `[2, 1, 1]`, so the CFD partition boundary sits at
 //! `x = 0.5`. The coupling package additionally owns a 3-way DEM ownership
-//! decomposition in `x` (thresholds [`DEM_SPLIT`]); a particle that drifts past
+//! decomposition supplied by SOIL's [`ParticlePartitionDirectory`]; a particle that drifts past
 //! one of those thresholds is physically migrated to the new DEM owner over the
 //! DEM *role* communicator (real point-to-point MPI, isolated from both the
 //! coupling exchange and the CFD role), carrying its stable ID and full
@@ -45,7 +45,7 @@ use field_core::{UniformMesh, UniformMeshConfig};
 use grass_app::App;
 use grass_mpi::{CommBackend, MpiCommBackend};
 use grass_multi::{CoupledPairRunner, CouplingEpoch, RoleLaunch};
-use soil_core::{Accum, Atom, Real};
+use soil_core::{Accum, Atom, ParticlePartitionDirectory, Real};
 
 const CHILD_ENV: &str = "DEM_CFD_ROUTED_TRAJECTORY_CHILD";
 const STEPS: u64 = 320;
@@ -57,7 +57,6 @@ const DENSITY: f64 = 2_500.0;
 /// `0.35 ≤ x < 0.55`, rank 2 owns `x ≥ 0.55`. Deliberately independent of the
 /// FIELD `[2,1,1]` CFD partition boundary at `x = 0.5` so a particle can cross a
 /// CFD partition boundary and a DEM ownership boundary at different times.
-const DEM_SPLIT: [f64; 2] = [0.35, 0.55];
 
 /// Flat migration record: tag, x, y, z, vx, vy, vz, mass, radius, fx, fy, fz.
 const MIG_RECORD: usize = 12;
@@ -96,14 +95,10 @@ fn directory() -> PartitionDirectory {
 
 /// DEM role-rank that owns a particle at `center`, from its world `x`.
 fn dem_owner_of(center: [f64; 3]) -> i32 {
-    let x = center[0];
-    if x < DEM_SPLIT[0] {
-        0
-    } else if x < DEM_SPLIT[1] {
-        1
-    } else {
-        2
-    }
+    ParticlePartitionDirectory::new([0.0; 3], [1.0; 3], [3, 1, 1])
+        .unwrap()
+        .owner_rank(center)
+        .expect("particle remains inside DEM domain")
 }
 
 fn local_initial(rank: i32) -> Vec<(u64, [f64; 3], [f64; 3])> {

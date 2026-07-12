@@ -1,8 +1,7 @@
 //! The same binary and TOML run a local DEM-CFD route or a 3+2 MPI split.
 
 use dem_cfd::routing::{
-    decode_particles, reduce_forces, route_forces, route_particles, RoutedForce,
-    RoutedParticle,
+    decode_particles, reduce_forces, route_forces, route_particles, RoutedForce, RoutedParticle,
 };
 use field_core::{PartitionDirectory, UniformMeshConfig};
 use grass_multi::{CoupledPairRunner, CouplingEpoch, PairRun, RoleLaunch};

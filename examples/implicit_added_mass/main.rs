@@ -18,10 +18,11 @@ use field_core::{MeshScheduleSet, UniformMeshConfig};
 use grass_app::prelude::*;
 use grass_io::Config;
 use grass_multi::{
-    converge_outer_iter, tick_subapp, Multi, MultiAppExt, OuterIteration, Relaxation, SubApps,
+    advance_to_seam, complete_subapp_step, converge_outer_iter, snapshot_subapp_resource,
+    tick_subapp, Multi, MultiAppExt, OuterIteration, Relaxation, SubApps,
 };
 use grass_scheduler::prelude::*;
-use grass_scheduler::{Res, ResMut};
+use grass_scheduler::{Res, ResMut, Schedule, Snapshot};
 use serde::Deserialize;
 use soil_core::Atom;
 
@@ -102,10 +103,12 @@ fn build_cfd(gas: &GasCfg, mesh_cfg: UniformMeshConfig, map: AddedMassMap) -> Ap
 
 #[derive(Clone, Copy, Debug, ScheduleSet)]
 enum ImplicitPhase {
+    Snapshot,
     Export,
-    TickCfd,
+    AdvanceCfd,
     Import,
     TickSoil,
+    CompleteCfd,
     Converge,
 }
 
@@ -123,20 +126,28 @@ fn coupled_parent(
         mass,
         dt: c.dt,
     };
-    let soil = build_soil_bed(
+    let mut soil = build_soil_bed(
         &[[0.5, 0.5, particle.z0]],
         particle.radius,
         particle.density,
         0.0,
         c.dt,
     );
-    let cfd = build_cfd(gas, mesh_cfg, map);
+    let mut cfd = build_cfd(gas, mesh_cfg, map);
     if !implicit {
         return couple_two_way(soil, cfd, particle.radius);
     }
 
+    soil.add_resource(Snapshot::<Atom>::default());
+    cfd.set_schedule(
+        Schedule::builder()
+            .then_variant(MeshScheduleSet::Output)
+            .export_seam("cfd.interface_ready")
+            .build(),
+    );
+
     let mut parent = App::new();
-    parent.add_subapp("soil", soil);
+    parent.add_subapp("dem", soil);
     parent.add_subapp("cfd", cfd);
     parent.add_resource(ParticleSpec {
         radius: particle.radius,
@@ -149,15 +160,27 @@ fn coupled_parent(
         c.implicit_tol,
         c.implicit_max_iters,
     ));
+    parent.add_update_system(
+        snapshot_subapp_resource::<Atom>("dem"),
+        ImplicitPhase::Snapshot,
+    );
     parent.add_update_system(export_kinematics, ImplicitPhase::Export);
-    parent.add_update_system(tick_subapp("cfd", 1), ImplicitPhase::TickCfd);
+    parent.add_update_system(
+        advance_to_seam::<CfdNs>("cfd.interface_ready"),
+        ImplicitPhase::AdvanceCfd,
+    );
     parent.add_update_system(import_force, ImplicitPhase::Import);
-    parent.add_update_system(tick_subapp("soil", 1), ImplicitPhase::TickSoil);
+    parent.add_update_system(tick_subapp("dem", 1), ImplicitPhase::TickSoil);
+    parent.add_update_system(complete_subapp_step::<CfdNs>(), ImplicitPhase::CompleteCfd);
     parent.add_update_system(
         converge_outer_iter(
-            |w: &Multi| vec![w.expect_read::<Atom>("soil").vel[0][2] as f64],
+            |w: &Multi| vec![w.expect_read::<Atom>("dem").vel[0][2] as f64],
             |w: &Multi, x: &[f64]| {
-                let mut atoms = w.expect_write::<Atom>("soil");
+                let saved = w.expect_write::<Snapshot<Atom>>("dem").saved.take();
+                if let Some(saved) = saved {
+                    *w.expect_write::<Atom>("dem") = saved;
+                }
+                let mut atoms = w.expect_write::<Atom>("dem");
                 atoms.vel[0][2] = x[0] as _;
                 atoms.force[0] = [0.0, 0.0, 0.0];
             },
@@ -190,7 +213,7 @@ fn main() {
         coupling.map_slope, coupling.map_intercept, x_star
     );
     println!("# explicit path: dem_cfd::seam::couple_two_way (omega = 1 / plain Picard)");
-    println!("# implicit path: same Export/TickCfd/Import/TickSoil seam phases + grass_multi::converge_outer_iter(Aitken)");
+    println!("# implicit path: snapshot → exported CFD interface seam → tentative SOIL response → rollback + Aitken relaxation");
     println!("#");
     println!("# explicit trace");
     println!("# step  v_in          v_tilde      v_after      residual");
@@ -279,7 +302,7 @@ fn main() {
 
 fn read_particle_vz(parent: &App) -> f64 {
     let subs = parent.get_resource_ref::<SubApps>().unwrap();
-    let soil = subs.find("soil").unwrap();
+    let soil = subs.find("dem").expect("particle participant");
     let cell = soil
         .resource_cell(std::any::TypeId::of::<Atom>())
         .unwrap()
