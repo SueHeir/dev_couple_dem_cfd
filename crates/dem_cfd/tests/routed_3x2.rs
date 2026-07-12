@@ -44,6 +44,7 @@ fn particle(id: u64, dem_owner: i32, x: f64, vx: f64) -> RoutedParticle {
         center: [x, 0.5, 0.5],
         velocity: [vx, 0.0, 0.0],
         radius: 0.01,
+        prev_force: [0.0; 3],
     }
 }
 

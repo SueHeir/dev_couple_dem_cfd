@@ -8,7 +8,7 @@ use grass_multi::{EntityId, ReceivedPayload, RoutedPayload};
 use std::collections::BTreeMap;
 use std::fmt;
 
-const PARTICLE_BYTES: usize = 8 + 4 + 3 * 8 + 3 * 8 + 8;
+const PARTICLE_BYTES: usize = 8 + 4 + 3 * 8 + 3 * 8 + 8 + 3 * 8;
 const FORCE_BYTES: usize = 8 + 4 + 3 * 8;
 
 /// Particle state required by the unresolved DEM-CFD spatial seam.
@@ -24,6 +24,14 @@ pub struct RoutedParticle {
     pub velocity: [f64; 3],
     /// Physical particle radius.
     pub radius: f64,
+    /// Fluid force the particle carried out of the *previous* coupling step,
+    /// travelling with the particle across CFD-partition and DEM-ownership
+    /// boundaries. The receiving CFD owner needs it to form the trapezoidal
+    /// (velocity-Verlet) momentum-sink reaction `0.5·(F_prev + F_now)` even on
+    /// the first step it sees a freshly migrated particle; otherwise a boundary
+    /// crossing would silently degrade the sink to a rectangle rule and break
+    /// exact cross-role impulse conservation. Zero on the primed first step.
+    pub prev_force: [f64; 3],
 }
 
 /// Force result returned by a CFD owner to the particle's DEM owner.
@@ -125,6 +133,9 @@ fn encode_particle(particle: RoutedParticle) -> Vec<u8> {
         bytes.extend_from_slice(&value.to_le_bytes());
     }
     bytes.extend_from_slice(&particle.radius.to_le_bytes());
+    for value in particle.prev_force {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
     bytes
 }
 
@@ -141,12 +152,14 @@ fn decode_particle(bytes: &[u8]) -> Result<RoutedParticle, ParticleRoutingError>
     let center = std::array::from_fn(|_| read_f64(bytes, &mut cursor));
     let velocity = std::array::from_fn(|_| read_f64(bytes, &mut cursor));
     let radius = read_f64(bytes, &mut cursor);
+    let prev_force = std::array::from_fn(|_| read_f64(bytes, &mut cursor));
     Ok(RoutedParticle {
         id,
         dem_owner,
         center,
         velocity,
         radius,
+        prev_force,
     })
 }
 
@@ -270,6 +283,7 @@ mod tests {
             center: [x, 0.5, 0.5],
             velocity: [x, -x, 0.0],
             radius: 0.01,
+            prev_force: [0.5 * x, -0.25 * x, 0.125],
         }
     }
 
