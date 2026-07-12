@@ -170,10 +170,16 @@ through the live drag seam:
 
 The added-mass gate uses the same seam to show the shared-state access story:
 explicit `couple_two_way` diverges on a strong interface map, while the parent can
-read, relax, and inject the interface state in place with `converge_outer_iter` +
-Aitken relaxation:
+snapshot the DEM state, advance CFD only to its exported `cfd.interface_ready`
+seam, run a tentative DEM response, roll it back, and inject the relaxed state
+with `converge_outer_iter` + Aitken relaxation:
 
 ![implicit added-mass seam convergence](examples/implicit_added_mass/plots/implicit_added_mass.png)
+
+The companion [`closed_momentum`](crates/dem_cfd/tests/closed_momentum.rs) gate
+isolates the gas from boundary fluxes and directly verifies the realized update
+`Δp_gas + Δp_particles = 0`, catching sink sign, magnitude, and cell-volume
+errors independently of the routed temporal-impulse test.
 
 ## License
 
