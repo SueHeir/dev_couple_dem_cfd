@@ -112,7 +112,9 @@ mpirun --oversubscribe -np 5 target/debug/examples/routed_dem_cfd
 - [`routed_3x2.rs`](crates/dem_cfd/tests/routed_3x2.rs) is the smallest complete
   3-DEM/2-CFD position-to-owner and stable-ID force-return example.
 - [`routed_trajectory_3x2.rs`](crates/dem_cfd/tests/routed_trajectory_3x2.rs)
-  adds moving particles, ownership crossings, and temporal impulse checks.
+  adds moving particles, ownership crossings, SOIL's 3-D ownership directory,
+  transactional `ParticleStore` migration, and temporal impulse checks. Contact
+  ghosts/bonds are still a later solver-level validation, not implied here.
 - [`routing.rs`](crates/dem_cfd/src/routing.rs) contains the coupling-owned wire
   records and FIELD `PartitionDirectory` lookup. GRASS transports addressed
   bytes; it does not know particles, meshes, positions, or ownership policy.

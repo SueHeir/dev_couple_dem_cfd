@@ -45,7 +45,7 @@ use field_core::{UniformMesh, UniformMeshConfig};
 use grass_app::App;
 use grass_mpi::{CommBackend, MpiCommBackend};
 use grass_multi::{CoupledPairRunner, CouplingEpoch, RoleLaunch};
-use soil_core::{Accum, Atom, ParticlePartitionDirectory, Real};
+use soil_core::{Atom, AtomDataRegistry, ParticlePartitionDirectory, ParticleStore};
 
 const CHILD_ENV: &str = "DEM_CFD_ROUTED_TRAJECTORY_CHILD";
 const STEPS: u64 = 320;
@@ -59,7 +59,6 @@ const DENSITY: f64 = 2_500.0;
 /// CFD partition boundary and a DEM ownership boundary at different times.
 
 /// Flat migration record: tag, x, y, z, vx, vy, vz, mass, radius, fx, fy, fz.
-const MIG_RECORD: usize = 12;
 
 /// Stable IDs seeded across the DEM role (used for the migration conservation
 /// checks).
@@ -359,46 +358,40 @@ fn ring_all_gather(comm: &MpiCommBackend, local: &[f64]) -> Vec<f64> {
 /// slab to its new owner over the DEM role communicator, and receive any atoms
 /// migrating in. Real point-to-point MPI on the role communicator — isolated
 /// from the coupling exchange (a duplicated communicator) and from the CFD role.
-/// Stable ID and full state (position, velocity, mass, radius, and the fluid
-/// force carried for the next trapezoid) travel with the atom. Returns the number
-/// of atoms this rank sent away.
+/// Stable ID, core state, and every registered `AtomData` extension travel
+/// through SOIL's transactional `ParticleStore` codec. Returns the number of
+/// atoms this rank sent away.
 fn migrate_dem_atoms(app: &App, comm: &MpiCommBackend) -> u64 {
     let rank = comm.rank() as usize;
     let size = comm.size() as usize;
 
-    let mut keep: Vec<f64> = Vec::new();
     let mut send: Vec<Vec<f64>> = vec![Vec::new(); size];
-    {
-        let atoms = app.get_resource_ref::<Atom>().expect("DEM Atom");
-        for i in 0..atoms.nlocal as usize {
-            let center = [
-                atoms.pos[i][0] as f64,
-                atoms.pos[i][1] as f64,
-                atoms.pos[i][2] as f64,
-            ];
-            let record = [
-                atoms.tag[i] as f64,
-                center[0],
-                center[1],
-                center[2],
-                atoms.vel[i][0] as f64,
-                atoms.vel[i][1] as f64,
-                atoms.vel[i][2] as f64,
-                atoms.mass[i] as f64,
-                atoms.cutoff_radius[i] as f64,
-                atoms.force[i][0] as f64,
-                atoms.force[i][1] as f64,
-                atoms.force[i][2] as f64,
-            ];
-            let owner = dem_owner_of(center) as usize;
-            if owner == rank {
-                keep.extend_from_slice(&record);
-            } else {
-                send[owner].extend_from_slice(&record);
+    let atom_cell = app.resource_cell(TypeId::of::<Atom>()).expect("DEM Atom");
+    let registry_cell = app
+        .resource_cell(TypeId::of::<AtomDataRegistry>())
+        .expect("AtomDataRegistry");
+    let migrated_out = {
+        let registry = registry_cell.borrow();
+        let registry = registry.downcast_ref::<AtomDataRegistry>().unwrap();
+        let mut atoms = atom_cell.borrow_mut();
+        let atoms = atoms.downcast_mut::<Atom>().unwrap();
+        let destinations: Vec<_> = (0..atoms.nlocal as usize)
+            .map(|i| dem_owner_of(atoms.pos[i].map(|x| x as f64)) as usize)
+            .collect();
+        let mut store = ParticleStore::new(atoms, registry);
+        for (index, &owner) in destinations.iter().enumerate() {
+            if owner != rank {
+                store.pack_migrant(index, &mut send[owner]).unwrap();
             }
         }
-    }
-    let migrated_out = (send.iter().map(Vec::len).sum::<usize>() / MIG_RECORD) as u64;
+        let migrated_out = destinations.iter().filter(|&&owner| owner != rank).count() as u64;
+        for index in (0..destinations.len()).rev() {
+            if destinations[index] != rank {
+                store.swap_remove(index).unwrap();
+            }
+        }
+        migrated_out
+    };
 
     let mut received: Vec<f64> = Vec::new();
     for dist in 1..size {
@@ -408,53 +401,27 @@ fn migrate_dem_atoms(app: &App, comm: &MpiCommBackend) -> u64 {
         received.extend_from_slice(&got);
     }
 
-    borrow_mut::<Atom>(app, |atoms| rebuild_local_atoms(atoms, &keep, &received));
+    let received_count = framed_record_count(&received);
+    let registry = registry_cell.borrow();
+    let registry = registry.downcast_ref::<AtomDataRegistry>().unwrap();
+    let mut atoms = atom_cell.borrow_mut();
+    let atoms = atoms.downcast_mut::<Atom>().unwrap();
+    ParticleStore::new(atoms, registry)
+        .append_migrant_records(&received, received_count)
+        .expect("received migrant records");
     migrated_out
 }
 
-/// Rebuild the local `Atom` store from the kept and freshly received flat
-/// records. The bed uses only core per-atom fields (velocity Verlet + the seam
-/// force), so no `AtomDataRegistry` mirroring is required.
-fn rebuild_local_atoms(atoms: &mut Atom, keep: &[f64], received: &[f64]) {
-    atoms.tag.clear();
-    atoms.atom_type.clear();
-    atoms.origin_index.clear();
-    atoms.pos.clear();
-    atoms.vel.clear();
-    atoms.force.clear();
-    atoms.cutoff_radius.clear();
-    atoms.mass.clear();
-    atoms.inv_mass.clear();
-    atoms.image.clear();
-    atoms.is_ghost.clear();
-
-    for record in keep
-        .chunks_exact(MIG_RECORD)
-        .chain(received.chunks_exact(MIG_RECORD))
-    {
-        let mass = record[7];
-        atoms.tag.push(record[0] as u32);
-        atoms.atom_type.push(0);
-        atoms.origin_index.push(0);
-        atoms
-            .pos
-            .push([record[1] as Real, record[2] as Real, record[3] as Real]);
-        atoms
-            .vel
-            .push([record[4] as Real, record[5] as Real, record[6] as Real]);
-        atoms
-            .force
-            .push([record[9] as Accum, record[10] as Accum, record[11] as Accum]);
-        atoms.cutoff_radius.push(record[8] as Real);
-        atoms.mass.push(mass as Real);
-        atoms.inv_mass.push((1.0 / mass) as Real);
-        atoms.image.push([0, 0, 0]);
-        atoms.is_ghost.push(false);
+fn framed_record_count(payload: &[f64]) -> usize {
+    let mut at = 0;
+    let mut count = 0;
+    while at < payload.len() {
+        let length = payload[at] as usize;
+        at += length + 1;
+        count += 1;
     }
-
-    let n = atoms.tag.len() as u32;
-    atoms.nlocal = n;
-    atoms.natoms = n as u64;
+    assert_eq!(at, payload.len(), "migrant frame boundary");
+    count
 }
 
 fn run_role(launch: RoleLaunch) {

@@ -29,4 +29,10 @@ jobs:
         env:
           OMPI_MCA_rmaps_base_oversubscribe: "1"
         run: timeout 180 cargo test -p dem_cfd --features mpi-routing -- --nocapture
-
+      - name: Same-binary local and 3+2 MPI example
+        env:
+          OMPI_MCA_rmaps_base_oversubscribe: "1"
+        run: |
+          cargo run --example routed_dem_cfd --features mpi-routing
+          cargo build --example routed_dem_cfd --features mpi-routing
+          timeout 60 mpirun --oversubscribe -np 5 target/debug/examples/routed_dem_cfd

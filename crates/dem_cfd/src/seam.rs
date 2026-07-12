@@ -23,7 +23,7 @@ use grass_multi::{
 };
 use grass_scheduler::prelude::*;
 use grass_scheduler::{Res, ResMut};
-use soil_core::{Accum, Atom, ParticleSimScheduleSet};
+use soil_core::{Accum, Atom, AtomDataRegistry, ParticleSimScheduleSet};
 use soil_verlet::VelocityVerletPlugin;
 
 use crate::config::GasCfg;
@@ -211,6 +211,7 @@ pub fn build_soil_bed(positions: &[[f64; 3]], radius: f64, density: f64, gz: f64
 
     let mut app = App::new();
     app.add_resource(atoms);
+    app.add_resource(AtomDataRegistry::default());
     app.add_resource(FluidForces::default());
     app.add_resource(BodyAccel { g: [0.0, 0.0, gz] });
     app.add_update_system(bed_force, ParticleSimScheduleSet::Force);
