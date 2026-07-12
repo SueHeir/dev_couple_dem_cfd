@@ -10,7 +10,7 @@ publish = false
 [features]
 default = []
 resolved-ibm = ["dep:dirt_bond", "dep:dirt_atom"]
-mpi-routing = ["grass_multi/mpi", "dep:grass_mpi"]
+mpi-routing = ["grass_multi/mpi", "field_core/mpi_backend", "dep:grass_mpi"]
 
 # Own workspace root so cargo does not walk up into the sibling tier workspaces.
 # The reusable coupling layer lives in crates/dem_cfd; the examples ride on top.

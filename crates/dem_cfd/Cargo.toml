@@ -22,7 +22,7 @@ serde.workspace = true
 
 [features]
 default = []
-mpi-routing = ["grass_multi/mpi", "dep:grass_mpi"]
+mpi-routing = ["grass_multi/mpi", "field_core/mpi_backend", "dep:grass_mpi"]
 
 [dependencies.grass_mpi]
 workspace = true
