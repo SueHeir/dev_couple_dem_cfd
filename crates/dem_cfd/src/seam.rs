@@ -108,6 +108,9 @@ pub fn build_cfd_base(gas: &GasCfg, mesh_cfg: UniformMeshConfig, ctx: SeamCtx) -
 // ─── SOIL sub-App: a freely-moving (integrated) bed ──────────────────────────
 
 /// `Force` phase: force = m·gravity + the per-particle fluid load from the seam.
+// Casts bridge soil's precision-generic `Real` to the CFD side's fixed `f64`;
+// they are no-ops only under the `precision-double` build this coupling pins.
+#[allow(clippy::unnecessary_cast)]
 pub fn bed_force(mut atoms: ResMut<Atom>, ff: Res<FluidForces>, body: Res<BodyAccel>) {
     let n = atoms.nlocal as usize;
     for i in 0..n {
@@ -248,6 +251,9 @@ impl ScheduleSet for CouplePhase {
 }
 
 /// SOIL→FIELD: hand the (moving) bed kinematics across each step.
+// Casts bridge soil's precision-generic `Real` to the CFD side's fixed `f64`;
+// they are no-ops only under the `precision-double` build this coupling pins.
+#[allow(clippy::unnecessary_cast)]
 pub fn export_kinematics(world: Multi, spec: Res<ParticleSpec>) {
     let atoms = world.expect_read::<Atom>("dem");
     let n = atoms.nlocal as usize;
