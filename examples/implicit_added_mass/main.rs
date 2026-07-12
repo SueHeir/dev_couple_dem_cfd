@@ -279,9 +279,8 @@ fn main() {
 
 fn read_particle_vz(parent: &App) -> f64 {
     let subs = parent.get_resource_ref::<SubApps>().unwrap();
-    let cell = subs
-        .find("soil")
-        .unwrap()
+    let soil = subs.find("soil").unwrap();
+    let cell = soil
         .resource_cell(std::any::TypeId::of::<Atom>())
         .unwrap()
         .borrow();

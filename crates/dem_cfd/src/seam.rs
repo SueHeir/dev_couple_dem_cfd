@@ -17,7 +17,10 @@ use field_core::{
     FieldDefaultPlugins, FieldRegistry, MeshScheduleSet, UniformMesh, UniformMeshConfig, Vec3,
 };
 use grass_app::prelude::*;
-use grass_multi::{tick_subapp, Multi, MultiAppExt, OuterIterStopPlugin, SubApps};
+use grass_multi::{
+    namespace, tick_n_times, tick_subapp, Multi, MultiAppExt, MultiResMut, OuterIterStopPlugin,
+    SubApps,
+};
 use grass_scheduler::prelude::*;
 use grass_scheduler::{Res, ResMut};
 use soil_core::{Accum, Atom, ParticleSimScheduleSet};
@@ -72,6 +75,9 @@ pub struct SeamCtx {
     pub dt: f64,
     pub mode: SeamMode,
 }
+
+namespace!(pub DemNs = "dem");
+namespace!(pub CfdNs = "cfd");
 
 // ─── FIELD sub-App base ──────────────────────────────────────────────────────
 
@@ -211,8 +217,9 @@ pub fn build_soil_bed(positions: &[[f64; 3]], radius: f64, density: f64, gz: f64
 
 // ─── Dynamic two-way coupling schedule (moving bed) ──────────────────────────
 
-/// The four-phase schedule for a two-way coupled moving bed: export kinematics →
-/// tick the gas (and its seam system) → import the fluid force → tick the bed.
+/// The parent phases for a two-way coupled moving bed. The reusable plugin
+/// publishes force from inside the CFD child's final phase; the explicit
+/// `Import` phase remains available to manual [`couple_two_way`] drivers.
 #[derive(Debug, Clone, Copy)]
 pub enum CouplePhase {
     Export,
@@ -271,6 +278,19 @@ pub fn import_force(world: Multi) {
     let v = forces.force.clone();
     drop(forces);
     world.expect_write::<FluidForces>("dem").f = v;
+}
+
+/// FIELD-child adapter: publish the force computed by the CFD sub-App directly
+/// into the typed DEM namespace before the parent advances SOIL.
+///
+/// This runs at the end of the CFD child's `Output` phase. The source remains a
+/// normal child-local resource; only the destination crosses the namespace
+/// boundary, so the adapter cannot accidentally reach back into its own child.
+pub fn import_force_to_dem(
+    forces: Res<InterphaseForces>,
+    mut fluid_forces: MultiResMut<FluidForces, DemNs>,
+) {
+    fluid_forces.f.clone_from(&forces.force);
 }
 
 /// The standard dynamic unresolved DEM↔CFD coupling loop.
@@ -348,14 +368,14 @@ impl Plugin for DemCfdCouplingPlugin {
             cfd.add_resource(ParticleSet::default());
             cfd.add_resource(InterphaseForces::default());
             cfd.add_update_system(point_particle_exchange, MeshScheduleSet::Output);
+            cfd.add_update_system(import_force_to_dem, MeshScheduleSet::Output);
         });
         app.add_resource(ParticleSpec {
             radius: self.particle_radius,
         });
         app.add_update_system(export_kinematics, CouplePhase::Export);
-        app.add_update_system(tick_subapp("cfd", 1), CouplePhase::TickCfd);
-        app.add_update_system(import_force, CouplePhase::Import);
-        app.add_update_system(tick_subapp("dem", 1), CouplePhase::TickSoil);
+        app.add_update_system(tick_n_times::<CfdNs>(1), CouplePhase::TickCfd);
+        app.add_update_system(tick_n_times::<DemNs>(1), CouplePhase::TickSoil);
         app.add_plugins(OuterIterStopPlugin {
             n_iters: self.steps,
             phase: CouplePhase::Check,
@@ -394,24 +414,56 @@ pub fn couple_two_way(soil: App, cfd: App, radius: f64) -> App {
 /// Mutate a resource of type `T` on the named sub-App from the driver.
 pub fn with_subapp_resource<T: 'static>(parent: &App, sub: &str, f: impl FnOnce(&mut T)) {
     let subs = parent.get_resource_ref::<SubApps>().unwrap();
-    let cell = subs
-        .find(sub)
-        .unwrap()
-        .resource_cell(TypeId::of::<T>())
-        .unwrap();
+    let participant = subs.find(sub).unwrap();
+    let cell = participant.resource_cell(TypeId::of::<T>()).unwrap();
     f(cell.borrow_mut().downcast_mut::<T>().unwrap());
 }
 
 /// Read a `Copy` resource of type `T` from the named sub-App.
 pub fn read_subapp_resource<T: Copy + 'static>(parent: &App, sub: &str) -> T {
     let subs = parent.get_resource_ref::<SubApps>().unwrap();
-    let cell = subs
-        .find(sub)
-        .unwrap()
+    let participant = subs.find(sub).unwrap();
+    let cell = participant
         .resource_cell(TypeId::of::<T>())
         .unwrap()
         .borrow();
     *cell.downcast_ref::<T>().unwrap()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cfd_child_publishes_force_to_typed_dem_peer() {
+        let expected = vec![[1.0, -2.0, 3.5], [4.0, 5.0, -6.0]];
+
+        let mut dem = App::new();
+        dem.add_resource(FluidForces::default());
+
+        let mut cfd = App::new();
+        cfd.add_resource(InterphaseForces {
+            force: expected.clone(),
+        });
+
+        let mut parent = App::new();
+        parent.add_subapp_typed::<DemNs>(dem);
+        parent.add_subapp_typed::<CfdNs>(cfd);
+        parent.configure_subapp("cfd", |cfd| {
+            cfd.add_update_system(import_force_to_dem, MeshScheduleSet::Output);
+        });
+        parent.add_update_system(tick_n_times::<CfdNs>(1), CouplePhase::TickCfd);
+        parent.prepare();
+        parent.run();
+
+        let subs = parent.get_resource_ref::<SubApps>().unwrap();
+        let dem = subs.find("dem").unwrap();
+        let forces = dem
+            .resource_cell(TypeId::of::<FluidForces>())
+            .unwrap()
+            .borrow();
+        assert_eq!(forces.downcast_ref::<FluidForces>().unwrap().f, expected);
+    }
 }
 
 /// Set the imposed superficial velocity on the `cfd` sub-App.

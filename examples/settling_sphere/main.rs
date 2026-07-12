@@ -382,12 +382,8 @@ fn main() {
 /// Particle vertical velocity, slip speed |v_p|, and the current fluid force.
 fn read_particle(parent: &App) -> (f64, f64, Vec3) {
     let subs = parent.get_resource_ref::<SubApps>().unwrap();
-    let atom_cell = subs
-        .find("dem")
-        .unwrap()
-        .resource_cell(TypeId::of::<Atom>())
-        .unwrap()
-        .borrow();
+    let dem = subs.find("dem").unwrap();
+    let atom_cell = dem.resource_cell(TypeId::of::<Atom>()).unwrap().borrow();
     let atoms = atom_cell.downcast_ref::<Atom>().unwrap();
     let v = [
         atoms.vel[0][0] as f64,
@@ -398,9 +394,8 @@ fn read_particle(parent: &App) -> (f64, f64, Vec3) {
     let speed = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
     drop(atom_cell);
 
-    let f_cell = subs
-        .find("cfd")
-        .unwrap()
+    let cfd = subs.find("cfd").unwrap();
+    let f_cell = cfd
         .resource_cell(TypeId::of::<InterphaseForces>())
         .unwrap()
         .borrow();

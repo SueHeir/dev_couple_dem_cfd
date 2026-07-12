@@ -82,9 +82,8 @@ pub fn particle_height(parent: &App) -> f64 {
     let subapps = parent
         .get_resource_ref::<SubApps>()
         .expect("coupling sub-Apps");
-    let atoms = subapps
-        .find("dem")
-        .expect("dem sub-App")
+    let dem = subapps.find("dem").expect("dem sub-App");
+    let atoms = dem
         .resource_cell(TypeId::of::<Atom>())
         .expect("DEM particles")
         .borrow();
