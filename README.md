@@ -90,16 +90,39 @@ packed bed is a two-phase export-once schedule, not the dynamic four-phase one),
 and its **validation** gates. Fully *resolved* IBM couplings (a body meshed into
 the gas, like `cfd_ibm_fiber`) are a different pattern and do not use `dem_cfd`.
 
+## The same coupling contract, local or MPI
+
+The teaching and physical-validation examples mount DEM and CFD as local child
+Apps under one parent. The distributed tests use GRASS's current topology
+contract: one TOML document declares the `dem` and `cfd` roles, and the same
+test binary selects local or split-MPI execution from the launched world size.
+There is no second MPI-specific solver executable.
+
+- [`routed_3x2.rs`](crates/dem_cfd/tests/routed_3x2.rs) is the smallest complete
+  3-DEM/2-CFD position-to-owner and stable-ID force-return example.
+- [`routed_trajectory_3x2.rs`](crates/dem_cfd/tests/routed_trajectory_3x2.rs)
+  adds moving particles, ownership crossings, and temporal impulse checks.
+- [`routing.rs`](crates/dem_cfd/src/routing.rs) contains the coupling-owned wire
+  records and FIELD `PartitionDirectory` lookup. GRASS transports addressed
+  bytes; it does not know particles, meshes, positions, or ownership policy.
+
+Run the real distributed path with:
+
+```bash
+source ~/projects/.build-env
+cargo test -p dem_cfd --features mpi-routing --test routed_3x2 -- --nocapture
+cargo test -p dem_cfd --features mpi-routing --test routed_trajectory_3x2 -- --nocapture
+```
+
+The parent owns cross-solver reads and writes. Child solvers receive ordinary
+`Res`/`ResMut` for their own resources; they do not reach sideways into a peer
+App. Where a coupling must stop inside a loop, branch, or rollback-capable
+step, the child exports a scheduler seam and the parent drives `resume()` to
+that named boundary before exchanging data.
+
 ## What it does — resolved and unresolved particle–fluid coupling
 
-The DEM-CFD examples in this repo run **in-process**: the two solvers are
-`grass` sub-Apps under one parent schedule (`Tick → Couple`), sharing exactly one
-`grass_app::App` and `soil_core::Atom` type across the seam. The same `grass_multi`
-wire/remote-sub-App machinery is covered generically upstream in
-`grass/crates/grass_multi/tests/multi_phase3.rs`, where an in-process coupled pair is
-compared against a remote-transport pair using `add_remote_subapp`. No DEM-CFD example
-here is presented as a two-binary MPI validation yet. Five examples span the coupling
-regimes:
+The physical cases span these coupling regimes:
 
 | example | coupling | validates against |
 |---|---|---|

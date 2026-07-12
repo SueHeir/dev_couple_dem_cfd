@@ -284,23 +284,9 @@ pub fn import_force(world: Multi) {
 /// this system in the parent's [`CouplePhase::Import`] phase immediately after
 /// the typed CFD tick observes the same completed force result as a child
 /// adapter in `Output`. Keeping the handoff on the parent makes the coupling
-/// order explicit without removing child-level [`MultiResMut`] support for
-/// future algorithms that genuinely need an internal solver seam.
+/// order explicit and avoids cross-App access from inside a child scheduler.
 pub fn import_force_typed(
     forces: MultiRes<InterphaseForces, CfdNs>,
-    mut fluid_forces: MultiResMut<FluidForces, DemNs>,
-) {
-    fluid_forces.f.clone_from(&forces.force);
-}
-
-/// FIELD-child adapter: publish the force computed by the CFD sub-App directly
-/// into the typed DEM namespace before the parent advances SOIL.
-///
-/// This runs at the end of the CFD child's `Output` phase. The source remains a
-/// normal child-local resource; only the destination crosses the namespace
-/// boundary, so the adapter cannot accidentally reach back into its own child.
-pub fn import_force_to_dem(
-    forces: Res<InterphaseForces>,
     mut fluid_forces: MultiResMut<FluidForces, DemNs>,
 ) {
     fluid_forces.f.clone_from(&forces.force);
@@ -446,37 +432,6 @@ pub fn read_subapp_resource<T: Copy + 'static>(parent: &App, sub: &str) -> T {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn cfd_child_publishes_force_to_typed_dem_peer() {
-        let expected = vec![[1.0, -2.0, 3.5], [4.0, 5.0, -6.0]];
-
-        let mut dem = App::new();
-        dem.add_resource(FluidForces::default());
-
-        let mut cfd = App::new();
-        cfd.add_resource(InterphaseForces {
-            force: expected.clone(),
-        });
-
-        let mut parent = App::new();
-        parent.add_subapp_typed::<DemNs>(dem);
-        parent.add_subapp_typed::<CfdNs>(cfd);
-        parent.configure_subapp("cfd", |cfd| {
-            cfd.add_update_system(import_force_to_dem, MeshScheduleSet::Output);
-        });
-        parent.add_update_system(tick_n_times::<CfdNs>(1), CouplePhase::TickCfd);
-        parent.prepare();
-        parent.run();
-
-        let subs = parent.get_resource_ref::<SubApps>().unwrap();
-        let dem = subs.find("dem").unwrap();
-        let forces = dem
-            .resource_cell(TypeId::of::<FluidForces>())
-            .unwrap()
-            .borrow();
-        assert_eq!(forces.downcast_ref::<FluidForces>().unwrap().f, expected);
-    }
 
     #[test]
     fn parent_imports_force_after_typed_cfd_tick() {

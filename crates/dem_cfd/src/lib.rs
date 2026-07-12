@@ -43,8 +43,8 @@ pub mod prelude {
     };
     pub use crate::seam::{
         bed_force, build_cfd_base, build_soil_bed, couple_two_way, export_kinematics, import_force,
-        import_force_to_dem, import_force_typed, read_subapp_resource, set_seam_mode,
-        set_superficial, with_subapp_resource, BodyAccel, CfdNs, CouplePhase, DemCfdCouplingPlugin,
-        DemNs, FluidForces, ParticleSpec, SeamCtx, Superficial, R_GAS,
+        import_force_typed, read_subapp_resource, set_seam_mode, set_superficial,
+        with_subapp_resource, BodyAccel, CfdNs, CouplePhase, DemCfdCouplingPlugin, DemNs,
+        FluidForces, ParticleSpec, SeamCtx, Superficial, R_GAS,
     };
 }
