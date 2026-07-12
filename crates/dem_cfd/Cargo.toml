@@ -19,3 +19,11 @@ grass_scheduler.workspace = true
 soil_core.workspace = true
 soil_verlet.workspace = true
 serde.workspace = true
+
+[features]
+default = []
+mpi-routing = ["grass_multi/mpi", "dep:grass_mpi"]
+
+[dependencies.grass_mpi]
+workspace = true
+optional = true

@@ -10,6 +10,7 @@ publish = false
 [features]
 default = []
 resolved-ibm = ["dep:dirt_bond", "dep:dirt_atom"]
+mpi-routing = ["grass_multi/mpi", "dep:grass_mpi"]
 
 # Own workspace root so cargo does not walk up into the sibling tier workspaces.
 # The reusable coupling layer lives in crates/dem_cfd; the examples ride on top.
@@ -46,6 +47,7 @@ field_core      = { path = "../field/crates/field_core" }
 grass_app       = { path = "../grass/crates/grass_app" }
 grass_io        = { path = "../grass/crates/grass_io" }
 grass_multi     = { path = "../grass/crates/grass_multi" }
+grass_mpi       = { path = "../grass/crates/grass_mpi" }
 grass_scheduler = { path = "../grass/crates/grass_scheduler" }
 serde = { version = "1", features = ["derive"] }
 
@@ -93,6 +95,7 @@ field_core.workspace = true
 grass_app.workspace = true
 grass_io.workspace = true
 grass_multi.workspace = true
+grass_mpi = { workspace = true, optional = true }
 grass_scheduler.workspace = true
 serde.workspace = true
 

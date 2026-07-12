@@ -24,6 +24,8 @@ pub mod bed;
 pub mod config;
 pub mod drag;
 pub mod reference;
+#[cfg(feature = "mpi-routing")]
+pub mod routing;
 pub mod seam;
 
 pub use seam::DemCfdCouplingPlugin;
