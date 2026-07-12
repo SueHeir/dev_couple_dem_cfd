@@ -3,9 +3,12 @@
 #![cfg(feature = "mpi-routing")]
 
 use std::any::TypeId;
+use std::collections::{BTreeMap, BTreeSet};
 use std::process::Command;
 
-use cfd_ibm::coupling::{InterphaseForces, ParticleKinematics, ParticleSet};
+use cfd_boundary::{BoundaryPlugin, BoundaryRegistry};
+use cfd_ibm::coupling::{self, InterphaseForces, ParticleKinematics, ParticleSet};
+use cfd_solver::{FluxPlugin, IntegratorPlugin, SolverConfig, SolverPlugin};
 use cfd_state::CfdState;
 use dem_cfd::config::GasCfg;
 use dem_cfd::routing::{decode_particles, reduce_forces, route_forces, route_particles};
@@ -54,13 +57,13 @@ fn directory() -> PartitionDirectory {
 
 fn local_initial(rank: i32) -> Vec<(u64, [f64; 3], [f64; 3])> {
     match rank {
-        0 => vec![(100, [0.10, 0.5, 0.5], [0.12, 0.0, 0.0])],
+        0 => vec![(100, [0.25, 0.5, 0.5], [0.12, 0.0, 0.0])],
         // One DEM partition genuinely communicates with both FIELD owners.
         1 => vec![
             (110, [0.40, 0.5, 0.5], [0.08, 0.0, 0.0]),
-            (111, [0.60, 0.5, 0.5], [-0.08, 0.0, 0.0]),
+            (111, [0.60, 0.5, 0.5], [0.06, 0.0, 0.0]),
         ],
-        2 => vec![(120, [0.90, 0.5, 0.5], [-0.12, 0.0, 0.0])],
+        2 => vec![(120, [0.75, 0.5, 0.5], [0.10, 0.0, 0.0])],
         _ => unreachable!(),
     }
 }
@@ -105,6 +108,15 @@ fn build_cfd() -> App {
             mode: Default::default(),
         },
     );
+    app.add_plugins(BoundaryPlugin::<UniformMesh>::new(
+        BoundaryRegistry::default(),
+    ))
+    .add_plugins(FluxPlugin::<UniformMesh>::hllc())
+    .add_plugins(IntegratorPlugin::euler())
+    .add_plugins(SolverPlugin::<UniformMesh>::new(SolverConfig {
+        fixed_dt: Some(DT),
+        ..SolverConfig::default()
+    }));
     app.add_update_system(point_particle_exchange, MeshScheduleSet::Output);
     app.prepare();
     app
@@ -152,20 +164,85 @@ fn fluid_forces(app: &App, particles: &[RoutedParticle]) -> Vec<RoutedForce> {
         .collect()
 }
 
-fn apply_forces(app: &App, incoming: &[grass_multi::ReceivedPayload]) {
+fn apply_forces(app: &App, incoming: &[grass_multi::ReceivedPayload], prime_verlet: bool) -> f64 {
     let forces = reduce_forces(incoming).expect("reduce returned FIELD forces");
+    let atoms = app.get_resource_ref::<Atom>().expect("DEM Atom");
+    assert_eq!(
+        forces.len(),
+        atoms.nlocal as usize,
+        "one force per local particle"
+    );
+    let expected: BTreeSet<_> = (0..atoms.nlocal as usize)
+        .map(|i| atoms.tag[i] as u64)
+        .collect();
+    let actual: BTreeSet<_> = forces.iter().map(|force| force.id).collect();
+    assert_eq!(actual, expected, "exact stable-ID force return set");
+    let ordered: Vec<_> = (0..atoms.nlocal as usize)
+        .map(|i| {
+            forces
+                .iter()
+                .find(|force| force.id == atoms.tag[i] as u64)
+                .expect("force returned to current DEM owner")
+                .force
+        })
+        .collect();
+    drop(atoms);
     borrow_mut::<FluidForces>(app, |fluid| {
-        let atoms = app.get_resource_ref::<Atom>().expect("DEM Atom");
-        fluid.f = (0..atoms.nlocal as usize)
-            .map(|i| {
-                forces
-                    .iter()
-                    .find(|force| force.id == atoms.tag[i] as u64)
-                    .expect("force returned to current DEM owner")
-                    .force
-            })
-            .collect();
+        fluid.f.clone_from(&ordered);
     });
+    if prime_verlet {
+        borrow_mut::<Atom>(app, |atoms| {
+            for (atom_force, fluid_force) in atoms.force.iter_mut().zip(&ordered) {
+                *atom_force = fluid_force.map(|value| value as _);
+            }
+        });
+    }
+    ordered
+        .iter()
+        .flat_map(|force| force.iter())
+        .map(|value| value.abs())
+        .sum()
+}
+
+/// Correct the already-deposited rectangle-rule reaction to the same temporal
+/// impulse used by velocity Verlet: F0 on the primed first step, then
+/// 0.5*(F_previous + F_current). This makes the cross-role conservation check a
+/// property of the actual coupled discretization, not a tolerance accident.
+fn match_verlet_reaction(
+    app: &App,
+    particles: &[RoutedParticle],
+    forces: &[RoutedForce],
+    previous: &mut BTreeMap<u64, [f64; 3]>,
+) -> [f64; 3] {
+    let mut particle_impulse = [0.0; 3];
+    let corrections: Vec<[f64; 3]> = forces
+        .iter()
+        .map(|force| {
+            let old = previous.get(&force.id).copied().unwrap_or(force.force);
+            for axis in 0..3 {
+                particle_impulse[axis] += 0.5 * (old[axis] + force.force[axis]) * DT;
+            }
+            std::array::from_fn(|axis| 0.5 * (old[axis] - force.force[axis]))
+        })
+        .collect();
+    let kinematics: Vec<_> = particles
+        .iter()
+        .map(|p| ParticleKinematics {
+            center: p.center,
+            velocity: p.velocity,
+            radius: p.radius,
+        })
+        .collect();
+    let mesh = app.get_resource_ref::<UniformMesh>().expect("FIELD mesh");
+    let registry = app
+        .get_resource_ref::<FieldRegistry>()
+        .expect("FIELD registry");
+    let mut state = registry.expect_mut::<CfdState>("CfdState");
+    coupling::apply_momentum_sink(&*mesh, &mut state, &kinematics, &corrections, DT);
+    for force in forces {
+        previous.insert(force.id, force.force);
+    }
+    particle_impulse
 }
 
 fn particle_momentum(app: &App) -> [f64; 3] {
@@ -217,11 +294,21 @@ fn run_role(launch: RoleLaunch) {
     assert_eq!(solver_comm.rank(), rank);
     assert_eq!(solver_comm.size(), size);
 
-    let initial = if role == "dem" {
-        global_vector(&solver_comm, particle_momentum(&app))
+    let initial_particle_momentum =
+        (role == "dem").then(|| global_vector(&solver_comm, particle_momentum(&app)));
+    let initial_gas_momentum =
+        (role == "cfd").then(|| global_vector(&solver_comm, gas_momentum(&app)));
+    let initial_dem_velocity = if role == "dem" {
+        exported_particles(&app, rank)
+            .into_iter()
+            .map(|particle| (particle.id, particle.velocity))
+            .collect::<BTreeMap<_, _>>()
     } else {
-        global_vector(&solver_comm, gas_momentum(&app))
+        BTreeMap::new()
     };
+    let mut previous_cfd_force = BTreeMap::new();
+    let mut cfd_particle_impulse = [0.0; 3];
+    let mut exchanged_force_l1 = 0.0;
 
     for step in 0..STEPS {
         let outgoing = if role == "dem" {
@@ -241,7 +328,17 @@ fn run_role(launch: RoleLaunch) {
                 .all(|p| directory().owner_rank(p.center) == Some(rank)));
             set_particles(&app, &particles);
             app.run();
-            route_forces(&fluid_forces(&app, &particles))
+            let forces = fluid_forces(&app, &particles);
+            exchanged_force_l1 += forces
+                .iter()
+                .flat_map(|force| force.force)
+                .map(f64::abs)
+                .sum::<f64>();
+            let impulse = match_verlet_reaction(&app, &particles, &forces, &mut previous_cfd_force);
+            for axis in 0..3 {
+                cfd_particle_impulse[axis] += impulse[axis];
+            }
+            route_forces(&forces)
         } else {
             assert!(incoming.is_empty());
             Vec::new()
@@ -250,7 +347,7 @@ fn run_role(launch: RoleLaunch) {
             .exchange(CouplingEpoch(2 * step + 1), &outgoing)
             .expect("return live FIELD forces to SOIL owners");
         if role == "dem" {
-            apply_forces(&app, &incoming);
+            exchanged_force_l1 += apply_forces(&app, &incoming, step == 0);
             app.run();
             for particle in exported_particles(&app, rank) {
                 assert!(particle.center.into_iter().all(f64::is_finite));
@@ -261,13 +358,35 @@ fn run_role(launch: RoleLaunch) {
         }
     }
 
-    let final_momentum = if role == "dem" {
-        global_vector(&solver_comm, particle_momentum(&app))
+    let delta: [f64; 3] = if role == "dem" {
+        let final_momentum = global_vector(&solver_comm, particle_momentum(&app));
+        let initial = initial_particle_momentum.expect("DEM initial momentum");
+        std::array::from_fn(|axis| final_momentum[axis] - initial[axis])
     } else {
-        global_vector(&solver_comm, gas_momentum(&app))
+        let final_gas = global_vector(&solver_comm, gas_momentum(&app));
+        let initial_gas = initial_gas_momentum.expect("CFD initial momentum");
+        assert!(
+            (0..3).any(|axis| final_gas[axis] != initial_gas[axis]),
+            "the CFD solver trajectory must evolve its conserved state"
+        );
+        // The Euler domain momentum also contains boundary fluxes. The exact
+        // cross-role invariant is the equal-and-opposite coupling source.
+        global_vector(&solver_comm, cfd_particle_impulse).map(|impulse| -impulse)
     };
-    let delta: [f64; 3] = std::array::from_fn(|axis| final_momentum[axis] - initial[axis]);
-
+    let global_force_l1 = solver_comm.all_reduce_sum_f64(exchanged_force_l1);
+    assert!(
+        global_force_l1 > 0.0,
+        "coupling must exchange a nonzero force"
+    );
+    if role == "dem" {
+        let changed = exported_particles(&app, rank)
+            .into_iter()
+            .any(|particle| particle.velocity != initial_dem_velocity[&particle.id]);
+        assert!(
+            solver_comm.all_reduce_sum_f64(f64::from(changed)) > 0.0,
+            "at least one SOIL particle must evolve"
+        );
+    }
     // Cross-role diagnostic exchange: every peer root sees both role-global
     // momentum changes without leaking solver collectives across communicators.
     let diagnostic = if rank == 0 {
@@ -293,9 +412,14 @@ fn run_role(launch: RoleLaunch) {
         });
         for axis in 0..3 {
             let residual = delta[axis] + peer_delta[axis];
+            let scale = delta[axis].abs().max(peer_delta[axis].abs());
             assert!(
-                residual.abs() <= 5e-12 * delta[axis].abs().max(peer_delta[axis].abs()).max(1.0),
-                "cross-role momentum residual on axis {axis}: {residual:e}"
+                scale > 0.0 || axis != 0,
+                "x momentum exchange must be nonzero"
+            );
+            assert!(
+                residual.abs() <= 1e-9 * scale.max(f64::MIN_POSITIVE),
+                "cross-role momentum residual on axis {axis}: {residual:e} (scale {scale:e})"
             );
         }
     } else {

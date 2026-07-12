@@ -8,6 +8,7 @@ description = "Reusable unresolved (Euler-Lagrange) DEM<->CFD coupling layer on 
 
 [dependencies]
 cfd_eos.workspace = true
+cfd_boundary.workspace = true
 cfd_ibm.workspace = true
 cfd_solver.workspace = true
 cfd_state.workspace = true
