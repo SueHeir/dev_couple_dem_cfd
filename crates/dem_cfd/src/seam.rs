@@ -18,8 +18,8 @@ use field_core::{
 };
 use grass_app::prelude::*;
 use grass_multi::{
-    namespace, tick_n_times, tick_subapp, Multi, MultiAppExt, MultiResMut, OuterIterStopPlugin,
-    SubApps,
+    namespace, tick_n_times, tick_subapp, Multi, MultiAppExt, MultiRes, MultiResMut,
+    OuterIterStopPlugin, SubApps,
 };
 use grass_scheduler::prelude::*;
 use grass_scheduler::{Res, ResMut};
@@ -217,9 +217,7 @@ pub fn build_soil_bed(positions: &[[f64; 3]], radius: f64, density: f64, gz: f64
 
 // ─── Dynamic two-way coupling schedule (moving bed) ──────────────────────────
 
-/// The parent phases for a two-way coupled moving bed. The reusable plugin
-/// publishes force from inside the CFD child's final phase; the explicit
-/// `Import` phase remains available to manual [`couple_two_way`] drivers.
+/// The parent phases for a two-way coupled moving bed.
 #[derive(Debug, Clone, Copy)]
 pub enum CouplePhase {
     Export,
@@ -278,6 +276,21 @@ pub fn import_force(world: Multi) {
     let v = forces.force.clone();
     drop(forces);
     world.expect_write::<FluidForces>("dem").f = v;
+}
+
+/// Typed parent-owned FIELD→SOIL force handoff.
+///
+/// The explicit mesh schedule ends with [`MeshScheduleSet::Output`], so running
+/// this system in the parent's [`CouplePhase::Import`] phase immediately after
+/// the typed CFD tick observes the same completed force result as a child
+/// adapter in `Output`. Keeping the handoff on the parent makes the coupling
+/// order explicit without removing child-level [`MultiResMut`] support for
+/// future algorithms that genuinely need an internal solver seam.
+pub fn import_force_typed(
+    forces: MultiRes<InterphaseForces, CfdNs>,
+    mut fluid_forces: MultiResMut<FluidForces, DemNs>,
+) {
+    fluid_forces.f.clone_from(&forces.force);
 }
 
 /// FIELD-child adapter: publish the force computed by the CFD sub-App directly
@@ -368,13 +381,13 @@ impl Plugin for DemCfdCouplingPlugin {
             cfd.add_resource(ParticleSet::default());
             cfd.add_resource(InterphaseForces::default());
             cfd.add_update_system(point_particle_exchange, MeshScheduleSet::Output);
-            cfd.add_update_system(import_force_to_dem, MeshScheduleSet::Output);
         });
         app.add_resource(ParticleSpec {
             radius: self.particle_radius,
         });
         app.add_update_system(export_kinematics, CouplePhase::Export);
         app.add_update_system(tick_n_times::<CfdNs>(1), CouplePhase::TickCfd);
+        app.add_update_system(import_force_typed, CouplePhase::Import);
         app.add_update_system(tick_n_times::<DemNs>(1), CouplePhase::TickSoil);
         app.add_plugins(OuterIterStopPlugin {
             n_iters: self.steps,
@@ -453,6 +466,38 @@ mod tests {
             cfd.add_update_system(import_force_to_dem, MeshScheduleSet::Output);
         });
         parent.add_update_system(tick_n_times::<CfdNs>(1), CouplePhase::TickCfd);
+        parent.prepare();
+        parent.run();
+
+        let subs = parent.get_resource_ref::<SubApps>().unwrap();
+        let dem = subs.find("dem").unwrap();
+        let forces = dem
+            .resource_cell(TypeId::of::<FluidForces>())
+            .unwrap()
+            .borrow();
+        assert_eq!(forces.downcast_ref::<FluidForces>().unwrap().f, expected);
+    }
+
+    #[test]
+    fn parent_imports_force_after_typed_cfd_tick() {
+        let expected = vec![[1.0, -2.0, 3.5], [4.0, 5.0, -6.0]];
+
+        fn publish_in_output(mut forces: ResMut<InterphaseForces>) {
+            forces.force = vec![[1.0, -2.0, 3.5], [4.0, 5.0, -6.0]];
+        }
+
+        let mut dem = App::new();
+        dem.add_resource(FluidForces::default());
+
+        let mut cfd = App::new();
+        cfd.add_resource(InterphaseForces::default());
+        cfd.add_update_system(publish_in_output, MeshScheduleSet::Output);
+
+        let mut parent = App::new();
+        parent.add_subapp_typed::<DemNs>(dem);
+        parent.add_subapp_typed::<CfdNs>(cfd);
+        parent.add_update_system(tick_n_times::<CfdNs>(1), CouplePhase::TickCfd);
+        parent.add_update_system(import_force_typed, CouplePhase::Import);
         parent.prepare();
         parent.run();
 
