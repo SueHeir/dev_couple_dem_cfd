@@ -1,0 +1,12 @@
+# One document drives both placements. At world size 1 GRASS runs `dem` and
+# `cfd` as local roles; `mpirun -np 5` assigns the declared 3+2 rank split.
+[topology]
+mode = "auto"
+
+[[topology.role]]
+name = "dem"
+ranks = 3
+
+[[topology.role]]
+name = "cfd"
+ranks = 2

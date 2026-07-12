@@ -98,6 +98,17 @@ contract: one TOML document declares the `dem` and `cfd` roles, and the same
 test binary selects local or split-MPI execution from the launched world size.
 There is no second MPI-specific solver executable.
 
+The runnable [`routed_dem_cfd`](examples/routed_dem_cfd/main.rs) example is the
+literal same-binary demonstration. Its adjacent
+[`config.toml`](examples/routed_dem_cfd/config.toml) uses `mode = "auto"`: world
+size 1 composes both roles locally, while five ranks become 3 DEM + 2 CFD.
+
+```bash
+cargo run --example routed_dem_cfd --features mpi-routing
+cargo build --example routed_dem_cfd --features mpi-routing
+mpirun --oversubscribe -np 5 target/debug/examples/routed_dem_cfd
+```
+
 - [`routed_3x2.rs`](crates/dem_cfd/tests/routed_3x2.rs) is the smallest complete
   3-DEM/2-CFD position-to-owner and stable-ID force-return example.
 - [`routed_trajectory_3x2.rs`](crates/dem_cfd/tests/routed_trajectory_3x2.rs)
