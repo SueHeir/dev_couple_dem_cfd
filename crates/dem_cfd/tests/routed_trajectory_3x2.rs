@@ -79,16 +79,35 @@ const CONFIG: &str = r#"
 struct MigrationMarker(Vec<f64>);
 
 impl AtomData for MigrationMarker {
-    fn as_any(&self) -> &dyn Any { self }
-    fn as_any_mut(&mut self) -> &mut dyn Any { self }
-    fn snapshot(&self) -> Box<dyn AtomData> { Box::new(Self(self.0.clone())) }
-    fn len(&self) -> usize { self.0.len() }
-    fn push_default(&mut self) { self.0.push(-1.0); }
-    fn truncate(&mut self, n: usize) { self.0.truncate(n); }
-    fn swap_remove(&mut self, i: usize) { self.0.swap_remove(i); }
-    fn pack(&self, i: usize, buf: &mut Vec<f64>) { buf.push(self.0[i]); }
-    fn unpack(&mut self, buf: &[f64]) -> usize { self.0.push(buf[0]); 1 }
-    fn apply_permutation(&mut self, permutation: &[usize], n: usize) {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+    fn snapshot(&self) -> Box<dyn AtomData> {
+        Box::new(Self(self.0.clone()))
+    }
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+    unsafe fn push_default(&mut self) {
+        self.0.push(-1.0);
+    }
+    unsafe fn truncate(&mut self, n: usize) {
+        self.0.truncate(n);
+    }
+    unsafe fn swap_remove(&mut self, i: usize) {
+        self.0.swap_remove(i);
+    }
+    fn pack(&self, i: usize, buf: &mut Vec<f64>) {
+        buf.push(self.0[i]);
+    }
+    unsafe fn unpack(&mut self, buf: &[f64]) -> usize {
+        self.0.push(buf[0]);
+        1
+    }
+    unsafe fn apply_permutation(&mut self, permutation: &[usize], n: usize) {
         let old = self.0[..n].to_vec();
         for (destination, &source) in permutation.iter().enumerate() {
             self.0[destination] = old[source];
@@ -160,13 +179,12 @@ fn build_dem(rank: i32) -> App {
     {
         let atoms = app.get_resource_ref::<Atom>().unwrap();
         let markers = atoms.tag.iter().map(|&tag| tag as f64 + 0.25).collect();
-        let count = atoms.nlocal as usize;
-        drop(atoms);
         borrow_mut::<AtomDataRegistry>(&app, |registry| {
             registry
-                .try_register(MigrationMarker(markers), count)
+                .register_for_atoms(MigrationMarker(markers), &atoms)
                 .unwrap();
         });
+        drop(atoms);
     }
     app.prepare();
     app
@@ -210,7 +228,7 @@ fn build_cfd() -> App {
 /// first primed step.
 fn exported_particles(app: &App, dem_owner: i32) -> Vec<RoutedParticle> {
     let atoms = app.get_resource_ref::<Atom>().expect("DEM Atom");
-    (0..atoms.nlocal as usize)
+    (0..atoms.nlocal() as usize)
         .map(|i| RoutedParticle {
             id: atoms.tag[i] as u64,
             dem_owner,
@@ -256,15 +274,15 @@ fn apply_forces(app: &App, incoming: &[grass_multi::ReceivedPayload], prime_verl
     let atoms = app.get_resource_ref::<Atom>().expect("DEM Atom");
     assert_eq!(
         forces.len(),
-        atoms.nlocal as usize,
+        atoms.nlocal() as usize,
         "one force per local particle"
     );
-    let expected: BTreeSet<_> = (0..atoms.nlocal as usize)
+    let expected: BTreeSet<_> = (0..atoms.nlocal() as usize)
         .map(|i| atoms.tag[i] as u64)
         .collect();
     let actual: BTreeSet<_> = forces.iter().map(|force| force.id).collect();
     assert_eq!(actual, expected, "exact stable-ID force return set");
-    let ordered: Vec<_> = (0..atoms.nlocal as usize)
+    let ordered: Vec<_> = (0..atoms.nlocal() as usize)
         .map(|i| {
             forces
                 .iter()
@@ -339,7 +357,7 @@ fn match_verlet_reaction(
 fn particle_momentum(app: &App) -> [f64; 3] {
     let atoms = app.get_resource_ref::<Atom>().expect("DEM Atom");
     let mut momentum = [0.0; 3];
-    for i in 0..atoms.nlocal as usize {
+    for i in 0..atoms.nlocal() as usize {
         for (axis, total) in momentum.iter_mut().enumerate() {
             *total += atoms.mass[i] as f64 * atoms.vel[i][axis] as f64;
         }
@@ -407,7 +425,7 @@ fn migrate_dem_atoms(app: &App, comm: &MpiCommBackend) -> u64 {
         let registry = registry.downcast_ref::<AtomDataRegistry>().unwrap();
         let mut atoms = atom_cell.borrow_mut();
         let atoms = atoms.downcast_mut::<Atom>().unwrap();
-        let destinations: Vec<_> = (0..atoms.nlocal as usize)
+        let destinations: Vec<_> = (0..atoms.nlocal() as usize)
             .map(|i| dem_owner_of(atoms.pos[i].map(|x| x as f64)) as usize)
             .collect();
         let mut store = ParticleStore::new(atoms, registry);
@@ -460,7 +478,7 @@ fn assert_extension_follows_stable_id(app: &App) {
     let atoms = app.get_resource_ref::<Atom>().unwrap();
     let registry = app.get_resource_ref::<AtomDataRegistry>().unwrap();
     let marker = registry.expect::<MigrationMarker>("migration marker");
-    for i in 0..atoms.nlocal as usize {
+    for i in 0..atoms.nlocal() as usize {
         assert_eq!(marker.0[i], atoms.tag[i] as f64 + 0.25);
     }
 }
@@ -631,7 +649,7 @@ fn run_role(launch: RoleLaunch) {
 
         // Migration must conserve the global particle count and the stable-ID
         // set exactly.
-        let local_count = app.get_resource_ref::<Atom>().expect("DEM Atom").nlocal as f64;
+        let local_count = app.get_resource_ref::<Atom>().expect("DEM Atom").nlocal() as f64;
         let global_count = solver_comm.all_reduce_sum_f64(local_count) as u64;
         assert_eq!(
             global_count,

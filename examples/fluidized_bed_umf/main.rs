@@ -207,8 +207,7 @@ fn fluidized_seam_system(
     let mut f_drag = [0.0f64; 3];
     let mut f_fluid = [0.0f64; 3];
     for (i, p) in parts.iter().enumerate() {
-        let u_gas =
-            coupling::sample_gas_velocity(&*mesh, &state, eos, p.center).unwrap_or(u_g);
+        let u_gas = coupling::sample_gas_velocity(&*mesh, &state, eos, p.center).unwrap_or(u_g);
         let rho_f = coupling::sample_gas_density(&*mesh, &state, p.center).unwrap_or(ctx.rho);
         let eps = eps_field[cell_of_particle[i]];
 
@@ -230,7 +229,11 @@ fn fluidized_seam_system(
         //     momentum balance in the imposed-flow model fixes ε ∇P = −β u_rel, so
         //     the force on the particle is +V_p β u_rel / ε  (Σ = (1−ε)(dP/L) V_bed).
         //     Dropped by the omit_pressure_grad negative control.
-        let pg_coeff = if mode.omit_pressure_grad { 0.0 } else { v_p * beta / eps };
+        let pg_coeff = if mode.omit_pressure_grad {
+            0.0
+        } else {
+            v_p * beta / eps
+        };
         let f_pg = [pg_coeff * rel[0], pg_coeff * rel[1], pg_coeff * rel[2]];
 
         // (3) Hydrostatic buoyancy −ρ_f V g (tiny in gas; the ∇P→ρ_f g no-flow limit).
@@ -266,7 +269,13 @@ fn fluidized_seam_system(
     result.mom_err = momentum_sink_and_check(&mesh, &mut state, parts, &drag_on_particle, ctx.dt);
 }
 
-fn build_cfd(gas: &GasCfg, mesh_cfg: field_core::UniformMeshConfig, eps: f64, gz: f64, dt: f64) -> App {
+fn build_cfd(
+    gas: &GasCfg,
+    mesh_cfg: field_core::UniformMeshConfig,
+    eps: f64,
+    gz: f64,
+    dt: f64,
+) -> App {
     let ctx = SeamCtx {
         mu: gas.mu,
         rho: gas.rho,
@@ -282,7 +291,9 @@ fn build_cfd(gas: &GasCfg, mesh_cfg: field_core::UniformMeshConfig, eps: f64, gz
 }
 
 fn main() {
-    let path = std::env::args().nth(1).expect("usage: fluidized_bed_umf <case.toml>");
+    let path = std::env::args()
+        .nth(1)
+        .expect("usage: fluidized_bed_umf <case.toml>");
     let toml_src =
         std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("cannot read {path}: {e}"));
     let cfg = Config::from_str(&toml_src);
@@ -308,7 +319,12 @@ fn main() {
     assert!(
         pack.ncx % meshc.nx == 0 && pack.ncy % meshc.ny == 0 && pack.ncz % meshc.nz == 0,
         "mesh {}x{}x{} must divide packing {}x{}x{} evenly",
-        meshc.nx, meshc.ny, meshc.nz, pack.ncx, pack.ncy, pack.ncz
+        meshc.nx,
+        meshc.ny,
+        meshc.nz,
+        pack.ncx,
+        pack.ncy,
+        pack.ncz
     );
     let a = fcc_lattice_constant(d, pack.solid_fraction);
     let (positions, bounds) = fcc_packing([pack.ncx, pack.ncy, pack.ncz], a);
@@ -338,7 +354,9 @@ fn main() {
 
     println!("# Minimum fluidization velocity U_mf — DYNAMIC unresolved DEM-CFD seam");
     println!("# MEASURED drag: INDEPENDENT MacDonald et al. (1979) closure (180/1.8), assembled through the seam");
-    println!("# REFERENCE:     Wen & Yu (1966) correlation  Re_mf = sqrt(33.7^2 + 0.0408 Ar) - 33.7");
+    println!(
+        "# REFERENCE:     Wen & Yu (1966) correlation  Re_mf = sqrt(33.7^2 + 0.0408 Ar) - 33.7"
+    );
     println!(
         "# packing: FCC {}x{}x{} cells, N = {} spheres   d = {:.3e} m   a = {:.3e} m   nn gap = {:.2e} m",
         pack.ncx, pack.ncy, pack.ncz, n, d, a, nn_gap
@@ -356,9 +374,7 @@ fn main() {
         m_bed, w_buoy
     );
     println!("# Ar = {ar:.1}");
-    println!(
-        "# U_mf (Wen&Yu 1966, REFERENCE) = {u_wy:.5} m/s   (Re_mf = {re_wy:.3})",
-    );
+    println!("# U_mf (Wen&Yu 1966, REFERENCE) = {u_wy:.5} m/s   (Re_mf = {re_wy:.3})",);
     println!(
         "# U_mf (Ergun 1952 exact balance, bracket) = {u_erg:.5} m/s  ({:+.2}% vs Wen&Yu)",
         100.0 * (u_erg / u_wy - 1.0)
@@ -423,7 +439,11 @@ fn main() {
         worst_handoff = worst_handoff.max(handoff);
         sweep.push((u, a_meas));
         let re = gas.rho * u * d / gas.mu;
-        let state = if a_meas > 0.0 { "FLUIDIZES (lifts)" } else { "packed (settles)" };
+        let state = if a_meas > 0.0 {
+            "FLUIDIZES (lifts)"
+        } else {
+            "packed (settles)"
+        };
         println!(
             "  {u:>10.4}  {re:>6.2}   {a_meas:>15.4}   {a_force:>15.4}   {:>6.4}   {state}",
             handoff
@@ -447,7 +467,10 @@ fn main() {
     let u_mf_nopg = bisect_umf(
         &mut parent,
         &positions,
-        SeamMode { omit_pressure_grad: true, ..mode },
+        SeamMode {
+            omit_pressure_grad: true,
+            ..mode
+        },
         mass,
         g,
         n,
@@ -455,7 +478,10 @@ fn main() {
     let u_mf_epsbug = bisect_umf(
         &mut parent,
         &positions,
-        SeamMode { corrupt_eps_power: true, ..mode },
+        SeamMode {
+            corrupt_eps_power: true,
+            ..mode
+        },
         mass,
         g,
         n,
@@ -466,9 +492,7 @@ fn main() {
 
     println!("#");
     println!("# ── result ─────────────────────────────────────────────");
-    println!(
-        "# U_mf MEASURED (seam, MacDonald via live net-force bisection): {u_mf_seam:.5} m/s",
-    );
+    println!("# U_mf MEASURED (seam, MacDonald via live net-force bisection): {u_mf_seam:.5} m/s",);
     println!(
         "# U_mf Wen&Yu (1966) REFERENCE:                                 {u_wy:.5} m/s   rel.err {:.2}%  (tol {:.1}%)",
         100.0 * rel_umf, 100.0 * valid.tol_rel_umf
@@ -497,7 +521,8 @@ fn main() {
     );
     println!(
         "# deposition fidelity: worst |eps_cell − eps_bed|/eps_bed = {:.2}%  (tol {:.1}%)",
-        100.0 * worst_dep, 100.0 * valid.tol_deposit_cell
+        100.0 * worst_dep,
+        100.0 * valid.tol_deposit_cell
     );
     println!(
         "# momentum conservation err: {worst_mom:.2e}  (tol {:.0e})  [sanity only]",
@@ -512,7 +537,13 @@ fn main() {
     let pass_dep = worst_dep <= valid.tol_deposit_cell;
     let pass_mom = worst_mom <= valid.tol_momentum;
 
-    if pass_umf && pass_nontrivial && pass_dyn && pass_handoff && pass_regime && pass_dep && pass_mom
+    if pass_umf
+        && pass_nontrivial
+        && pass_dyn
+        && pass_handoff
+        && pass_regime
+        && pass_dep
+        && pass_mom
     {
         println!(
             "VALIDATION: PASS  (U_mf seam {u_mf_seam:.4} vs Wen&Yu {u_wy:.4}, {:.2}%<={:.1}%; dynamic onset matches & sign-monotone; handoff {:.3}<={:.3}; neg-controls fail at {:+.0}%/{:+.0}%; eps={eps:.3}<={}; dep {:.1}%; mom {worst_mom:.1e})",
@@ -546,8 +577,8 @@ fn export_and_seam(parent: &mut App) {
 
 /// Reset the bed atoms to their initial positions and zero velocity.
 fn reset_bed(parent: &App, positions: &[[f64; 3]]) {
-    with_subapp_resource::<Atom>(parent, "soil", |atoms| {
-        let n = atoms.nlocal as usize;
+    with_subapp_resource::<Atom>(parent, "dem", |atoms| {
+        let n = atoms.nlocal() as usize;
         for i in 0..n {
             atoms.pos[i] = [positions[i][0], positions[i][1], positions[i][2]];
             atoms.vel[i] = [0.0, 0.0, 0.0];
@@ -566,8 +597,8 @@ fn read_result(parent: &App) -> (Vec3, Vec3, f64, f64) {
 fn bed_com_vz(parent: &App) -> f64 {
     let mut sum = 0.0f64;
     let mut n = 0usize;
-    with_subapp_resource::<Atom>(parent, "soil", |atoms| {
-        n = atoms.nlocal as usize;
+    with_subapp_resource::<Atom>(parent, "dem", |atoms| {
+        n = atoms.nlocal() as usize;
         for i in 0..n {
             sum += atoms.vel[i][2] as f64;
         }

@@ -8,11 +8,12 @@ use std::any::TypeId;
 use cfd_eos::{Eos, IdealGas, Viscosity};
 use cfd_solver::{CfdStatePlugin, IdealGasPlugin};
 use cfd_state::PrimVar;
+use dem_cfd::seam::push_sphere;
 use field_core::{FieldDefaultPlugins, UniformMeshConfig, Vec3};
 use grass_app::prelude::*;
 use grass_multi::SubApps;
 use grass_scheduler::{CurrentState, ResMut};
-use soil_core::{Accum, Atom, AtomPlugin, CommState, ParticleSimScheduleSet};
+use soil_core::{Accum, Atom, AtomDataRegistry, AtomPlugin, CommState, ParticleSimScheduleSet};
 use soil_verlet::VelocityVerletPlugin;
 
 pub const RADIUS: f64 = 5.0e-4;
@@ -22,7 +23,7 @@ pub const GAS_VISCOSITY: f64 = 1.8e-5;
 pub const GRAVITY: Vec3 = [0.0, 0.0, -9.81];
 
 fn gravity(mut atoms: ResMut<Atom>) {
-    for i in 0..atoms.nlocal as usize {
+    for i in 0..atoms.nlocal() as usize {
         atoms.force[i][0] += (atoms.mass[i] as f64 * GRAVITY[0]) as Accum;
         atoms.force[i][1] += (atoms.mass[i] as f64 * GRAVITY[1]) as Accum;
         atoms.force[i][2] += (atoms.mass[i] as f64 * GRAVITY[2]) as Accum;
@@ -33,9 +34,14 @@ pub fn dem() -> App {
     let mut atoms = Atom::new();
     atoms.dt = DT;
     let mass = 2_500.0 * 4.0 / 3.0 * std::f64::consts::PI * RADIUS.powi(3);
-    atoms.push_test_atom(0, [0.005, 0.005, 0.015], RADIUS, mass);
-    atoms.nlocal = 1;
-    atoms.natoms = 1;
+    push_sphere(
+        &mut atoms,
+        &AtomDataRegistry::default(),
+        0,
+        [0.005, 0.005, 0.015],
+        RADIUS,
+        mass,
+    );
 
     let mut app = App::new();
     app.add_plugins(AtomPlugin)

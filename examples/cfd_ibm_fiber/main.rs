@@ -90,7 +90,8 @@ use serde::Deserialize;
 use dirt_atom::DemAtom;
 use dirt_bond::{auto_bond_touching, BondConfig};
 use soil_core::{
-    Atom, AtomDataRegistry, BondStore, CommResource, Domain, ScheduleSetupSet, SingleProcessComm,
+    Atom, AtomDataRegistry, BondStore, CommResource, Domain, ParticleStore, ScheduleSetupSet,
+    SingleProcessComm,
 };
 
 const R_GAS: f64 = 287.058; // matches IdealGas::air()
@@ -344,26 +345,42 @@ fn build_bpm_fiber(n: usize, diameter: f64, e_mod: f64, g_mod: f64) -> Fiber {
     let density = 2500.0;
 
     let mut atom = Atom::new();
-    let mut dem = DemAtom::new();
     atom.dt = 1e-6;
+    // Register the (empty) DEM + bond extensions first, so every bead appended
+    // through `ParticleStore` gets an aligned row in the core Atom AND in each
+    // registered extension; the new row is then filled in place.
+    let mut registry = AtomDataRegistry::new();
+    registry
+        .register_for_atoms(DemAtom::new(), &atom)
+        .expect("register DemAtom on the empty fiber store");
+    registry
+        .register_for_atoms(BondStore::new(), &atom)
+        .expect("register BondStore on the empty fiber store");
     let mut centers = Vec::with_capacity(n);
     for i in 0..n {
         let off = (i as f64 - (n as f64 - 1.0) / 2.0) * d;
         let pos = [off, 0.0, 0.0];
         centers.push(pos);
         let mass = density * 4.0 / 3.0 * std::f64::consts::PI * r.powi(3);
-        atom.push_test_atom(i as u32 + 1, pos, r, mass);
-        dem.radius.push(r);
-        dem.density.push(density);
-        dem.inv_inertia.push(1.0 / (0.4 * mass * r * r));
-        dem.quaternion.push([1.0, 0.0, 0.0, 0.0]);
-        dem.omega.push([0.0; 3]);
-        dem.ang_mom.push([0.0; 3]);
-        dem.torque.push([0.0; 3]);
-        dem.body_id.push(0.0);
+        ParticleStore::new(&mut atom, &registry)
+            .push_default_local(i as u64 + 1)
+            .expect("fiber bead must accept transactional insertion");
+        let k = atom.len() - 1;
+        atom.tag[k] = i as u32 + 1;
+        atom.pos[k] = [pos[0] as _, pos[1] as _, pos[2] as _];
+        atom.cutoff_radius[k] = r as _;
+        atom.mass[k] = mass as _;
+        atom.inv_mass[k] = (1.0 / mass) as _;
+        let mut dem = registry.expect_mut::<DemAtom>("fiber bead DemAtom row");
+        dem.radius[k] = r;
+        dem.density[k] = density;
+        dem.inv_inertia[k] = 1.0 / (0.4 * mass * r * r);
+        dem.quaternion[k] = [1.0, 0.0, 0.0, 0.0];
+        dem.omega[k] = [0.0; 3];
+        dem.ang_mom[k] = [0.0; 3];
+        dem.torque[k] = [0.0; 3];
+        dem.body_id[k] = 0.0;
     }
-    atom.nlocal = n as u32;
-    atom.natoms = n as u64;
 
     let bond_radius_ratio = 1.0;
     let cfg = BondConfig {
@@ -375,9 +392,6 @@ fn build_bpm_fiber(n: usize, diameter: f64, e_mod: f64, g_mod: f64) -> Fiber {
         ..BondConfig::default()
     };
 
-    let mut registry = AtomDataRegistry::new();
-    registry.register(dem);
-    registry.register(BondStore::new());
     let mut domain = Domain::new();
     domain.size = [1e3, 1e3, 1e3];
 
@@ -676,9 +690,9 @@ fn run_orientation(
 }
 
 fn main() {
-    let path = std::env::args().nth(1).expect(
-        "usage: cfd_ibm_fiber <case.toml>  (see examples/cfd_ibm_fiber/config.toml)",
-    );
+    let path = std::env::args()
+        .nth(1)
+        .expect("usage: cfd_ibm_fiber <case.toml>  (see examples/cfd_ibm_fiber/config.toml)");
     let toml_src =
         std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("cannot read {path}: {e}"));
     let cfg = Config::from_str(&toml_src);

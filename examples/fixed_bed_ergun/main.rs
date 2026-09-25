@@ -107,7 +107,9 @@
 //!   Media — the Ergun Equation Revisited", *Ind. Eng. Chem. Fundam.* 18(3):199–208 (1979).
 
 use cfd_eos::{Eos, EosResource};
-use cfd_ibm::coupling::{self, drag_force_from_beta, InterphaseForces, ParticleKinematics, ParticleSet};
+use cfd_ibm::coupling::{
+    self, drag_force_from_beta, InterphaseForces, ParticleKinematics, ParticleSet,
+};
 use cfd_state::CfdState;
 use field_core::{FieldRegistry, FvMesh, MeshScheduleSet, UniformMesh, UniformMeshConfig, Vec3};
 use grass_app::prelude::*;
@@ -116,7 +118,7 @@ use grass_multi::{tick_subapp, Multi, MultiAppExt};
 use grass_scheduler::prelude::*;
 use grass_scheduler::{Res, ResMut};
 use serde::Deserialize;
-use soil_core::Atom;
+use soil_core::{Atom, AtomDataRegistry};
 use soil_verlet::VelocityVerletPlugin;
 
 use dem_cfd::prelude::*;
@@ -261,11 +263,10 @@ fn build_soil(positions: &[[f64; 3]], radius: f64, density: f64) -> App {
     let mut atoms = Atom::new();
     atoms.dt = 1.0; // never integrated; particles are held fixed
     let mass = density * 4.0 / 3.0 * std::f64::consts::PI * radius.powi(3);
+    let registry = AtomDataRegistry::default();
     for (tag, pos) in positions.iter().enumerate() {
-        atoms.push_test_atom(tag as u32, *pos, radius, mass);
+        push_sphere(&mut atoms, &registry, tag as u32, *pos, radius, mass);
     }
-    atoms.nlocal = positions.len() as u32;
-    atoms.natoms = positions.len() as u64;
 
     let mut app = App::new();
     app.add_resource(atoms);
@@ -277,7 +278,13 @@ fn build_soil(positions: &[[f64; 3]], radius: f64, density: f64) -> App {
 
 /// Run the full superficial-velocity sweep once for a given seam mode, returning
 /// `(dP/L_meas per U, worst deposition-cell error, worst momentum error)`.
-fn run_sweep(parent: &mut App, us: &[f64], v_bed: f64, eps_bed: f64, mode: SeamMode) -> (Vec<f64>, f64, f64) {
+fn run_sweep(
+    parent: &mut App,
+    us: &[f64],
+    v_bed: f64,
+    eps_bed: f64,
+    mode: SeamMode,
+) -> (Vec<f64>, f64, f64) {
     set_seam_mode(parent, mode);
     let mut dpdl = Vec::with_capacity(us.len());
     let mut worst_dep = 0.0f64;
@@ -325,7 +332,12 @@ fn main() {
     assert!(
         pack.ncx % meshc.nx == 0 && pack.ncy % meshc.ny == 0 && pack.ncz % meshc.nz == 0,
         "mesh {}x{}x{} must divide packing {}x{}x{} evenly",
-        meshc.nx, meshc.ny, meshc.nz, pack.ncx, pack.ncy, pack.ncz
+        meshc.nx,
+        meshc.ny,
+        meshc.nz,
+        pack.ncx,
+        pack.ncy,
+        pack.ncz
     );
     let a = fcc_lattice_constant(d, pack.solid_fraction);
     let (positions, bounds) = fcc_packing([pack.ncx, pack.ncy, pack.ncz], a);
@@ -379,8 +391,13 @@ fn main() {
     );
 
     // ── The validation: MEASURED = independent MacDonald closure through the seam.
-    let mode = SeamMode { macdonald: true, corrupt_eps_power: false, ..SeamMode::default() };
-    let (dpdl_meas, worst_dep, worst_mom) = run_sweep(&mut parent, &flow.superficial, v_bed, eps_geo, mode);
+    let mode = SeamMode {
+        macdonald: true,
+        corrupt_eps_power: false,
+        ..SeamMode::default()
+    };
+    let (dpdl_meas, worst_dep, worst_mom) =
+        run_sweep(&mut parent, &flow.superficial, v_bed, eps_geo, mode);
 
     let mut all_ok = true;
     let mut rep_min = f64::INFINITY;
@@ -413,7 +430,11 @@ fn main() {
     // ── Negative control: corrupt the seam reduction (ε² instead of ε³) and show
     // it blows past the tolerance — proof the pass is genuinely capable of failing
     // and the tolerance is not tuned to admit a broken seam.
-    let corrupt = SeamMode { macdonald: true, corrupt_eps_power: true, ..SeamMode::default() };
+    let corrupt = SeamMode {
+        macdonald: true,
+        corrupt_eps_power: true,
+        ..SeamMode::default()
+    };
     let (dpdl_bad, _, _) = run_sweep(&mut parent, &flow.superficial, v_bed, eps_geo, corrupt);
     let mut worst_bad = 0.0f64;
     for (idx, &u) in flow.superficial.iter().enumerate() {
@@ -506,7 +527,7 @@ impl ScheduleSet for Phase {
 /// SOIL→FIELD half of the seam: hand the static packing's kinematics across (once).
 fn export_kinematics(world: Multi) {
     let atoms = world.expect_read::<Atom>("soil");
-    let n = atoms.nlocal as usize;
+    let n = atoms.nlocal() as usize;
     let mut set = world.expect_write::<ParticleSet>("cfd");
     if set.particles.len() == n {
         return; // static packing — export once

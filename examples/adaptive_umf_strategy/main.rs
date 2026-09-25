@@ -909,8 +909,8 @@ fn read_result(parent: &App) -> (Vec3, Vec3, f64, f64) {
 fn bed_com_vz(parent: &App) -> f64 {
     let mut sum = 0.0f64;
     let mut n = 0usize;
-    with_subapp_resource::<Atom>(parent, "soil", |atoms| {
-        n = atoms.nlocal as usize;
+    with_subapp_resource::<Atom>(parent, "dem", |atoms| {
+        n = atoms.nlocal() as usize;
         for i in 0..n {
             sum += atoms.vel[i][2] as f64;
         }
