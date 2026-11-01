@@ -22,7 +22,7 @@ pub const GAS_VISCOSITY: f64 = 1.8e-5;
 pub const GRAVITY: Vec3 = [0.0, 0.0, -9.81];
 
 fn gravity(mut atoms: ResMut<Atom>) {
-    for i in 0..atoms.nlocal as usize {
+    for i in 0..atoms.nlocal() as usize {
         atoms.force[i][0] += (atoms.mass[i] as f64 * GRAVITY[0]) as Accum;
         atoms.force[i][1] += (atoms.mass[i] as f64 * GRAVITY[1]) as Accum;
         atoms.force[i][2] += (atoms.mass[i] as f64 * GRAVITY[2]) as Accum;
@@ -33,9 +33,10 @@ pub fn dem() -> App {
     let mut atoms = Atom::new();
     atoms.dt = DT;
     let mass = 2_500.0 * 4.0 / 3.0 * std::f64::consts::PI * RADIUS.powi(3);
-    atoms.push_test_atom(0, [0.005, 0.005, 0.015], RADIUS, mass);
-    atoms.nlocal = 1;
-    atoms.natoms = 1;
+    // SAFETY: core-only fixture; the ownership layout is set below.
+    unsafe { atoms.push_test_atom(0, [0.005, 0.005, 0.015], RADIUS, mass) };
+    // SAFETY: no extensions are registered and every pushed row is local.
+    unsafe { atoms.set_layout_unchecked(1, 0, 1) };
 
     let mut app = App::new();
     app.add_plugins(AtomPlugin)
