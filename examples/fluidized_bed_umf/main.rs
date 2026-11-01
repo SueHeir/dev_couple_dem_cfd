@@ -547,7 +547,7 @@ fn export_and_seam(parent: &mut App) {
 /// Reset the bed atoms to their initial positions and zero velocity.
 fn reset_bed(parent: &App, positions: &[[f64; 3]]) {
     with_subapp_resource::<Atom>(parent, "soil", |atoms| {
-        let n = atoms.nlocal as usize;
+        let n = atoms.nlocal() as usize;
         for i in 0..n {
             atoms.pos[i] = [positions[i][0], positions[i][1], positions[i][2]];
             atoms.vel[i] = [0.0, 0.0, 0.0];
@@ -567,7 +567,7 @@ fn bed_com_vz(parent: &App) -> f64 {
     let mut sum = 0.0f64;
     let mut n = 0usize;
     with_subapp_resource::<Atom>(parent, "soil", |atoms| {
-        n = atoms.nlocal as usize;
+        n = atoms.nlocal() as usize;
         for i in 0..n {
             sum += atoms.vel[i][2] as f64;
         }

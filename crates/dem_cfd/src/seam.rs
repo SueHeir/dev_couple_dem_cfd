@@ -23,7 +23,7 @@ use grass_multi::{
 };
 use grass_scheduler::prelude::*;
 use grass_scheduler::{Res, ResMut};
-use soil_core::{Accum, Atom, AtomDataRegistry, ParticleSimScheduleSet};
+use soil_core::{Accum, Atom, AtomDataRegistry, ParticleSimScheduleSet, ParticleStore};
 use soil_verlet::VelocityVerletPlugin;
 
 use crate::config::GasCfg;
@@ -112,7 +112,7 @@ pub fn build_cfd_base(gas: &GasCfg, mesh_cfg: UniformMeshConfig, ctx: SeamCtx) -
 // they are no-ops only under the `precision-double` build this coupling pins.
 #[allow(clippy::unnecessary_cast)]
 pub fn bed_force(mut atoms: ResMut<Atom>, ff: Res<FluidForces>, body: Res<BodyAccel>) {
-    let n = atoms.nlocal as usize;
+    let n = atoms.nlocal() as usize;
     for i in 0..n {
         let m = atoms.mass[i] as f64;
         let f = ff.f.get(i).copied().unwrap_or([0.0; 3]);
@@ -127,7 +127,7 @@ pub fn bed_force(mut atoms: ResMut<Atom>, ff: Res<FluidForces>, body: Res<BodyAc
 /// Add the imported fluid force to whatever forces the standalone DEM solver
 /// already computes (gravity, contacts, bonds, constraints, ...).
 pub fn add_fluid_force(mut atoms: ResMut<Atom>, ff: Res<FluidForces>) {
-    for i in 0..atoms.nlocal as usize {
+    for i in 0..atoms.nlocal() as usize {
         let f = ff.f.get(i).copied().unwrap_or([0.0; 3]);
         atoms.force[i][0] += f[0] as Accum;
         atoms.force[i][1] += f[1] as Accum;
@@ -202,16 +202,24 @@ pub fn point_particle_exchange(
 pub fn build_soil_bed(positions: &[[f64; 3]], radius: f64, density: f64, gz: f64, dt: f64) -> App {
     let mut atoms = Atom::new();
     atoms.dt = dt;
+    let registry = AtomDataRegistry::default();
     let mass = density * 4.0 / 3.0 * std::f64::consts::PI * radius.powi(3);
+    let natoms = positions.len() as u64;
     for (tag, pos) in positions.iter().enumerate() {
-        atoms.push_test_atom(tag as u32, *pos, radius, mass);
+        ParticleStore::new(&mut atoms, &registry)
+            .push_default_local(natoms)
+            .expect("a core-only bed accepts transactional insertion");
+        let i = atoms.len() - 1;
+        atoms.tag[i] = tag as u32;
+        atoms.pos[i] = *pos;
+        atoms.cutoff_radius[i] = radius;
+        atoms.mass[i] = mass;
+        atoms.inv_mass[i] = 1.0 / mass;
     }
-    atoms.nlocal = positions.len() as u32;
-    atoms.natoms = positions.len() as u64;
 
     let mut app = App::new();
     app.add_resource(atoms);
-    app.add_resource(AtomDataRegistry::default());
+    app.add_resource(registry);
     app.add_resource(FluidForces::default());
     app.add_resource(BodyAccel { g: [0.0, 0.0, gz] });
     app.add_update_system(bed_force, ParticleSimScheduleSet::Force);
@@ -257,7 +265,7 @@ impl ScheduleSet for CouplePhase {
 #[allow(clippy::unnecessary_cast)]
 pub fn export_kinematics(world: Multi, spec: Res<ParticleSpec>) {
     let atoms = world.expect_read::<Atom>("dem");
-    let n = atoms.nlocal as usize;
+    let n = atoms.nlocal() as usize;
     let mut set = world.expect_write::<ParticleSet>("cfd");
     set.particles.clear();
     for i in 0..n {

@@ -262,10 +262,11 @@ fn build_soil(positions: &[[f64; 3]], radius: f64, density: f64) -> App {
     atoms.dt = 1.0; // never integrated; particles are held fixed
     let mass = density * 4.0 / 3.0 * std::f64::consts::PI * radius.powi(3);
     for (tag, pos) in positions.iter().enumerate() {
-        atoms.push_test_atom(tag as u32, *pos, radius, mass);
+        // SAFETY: core-only fixture; the ownership layout is set below.
+        unsafe { atoms.push_test_atom(tag as u32, *pos, radius, mass) };
     }
-    atoms.nlocal = positions.len() as u32;
-    atoms.natoms = positions.len() as u64;
+    // SAFETY: no extensions are registered and every pushed row is local.
+    unsafe { atoms.set_layout_unchecked(positions.len() as u32, 0, positions.len() as u64) };
 
     let mut app = App::new();
     app.add_resource(atoms);
@@ -506,7 +507,7 @@ impl ScheduleSet for Phase {
 /// SOIL→FIELD half of the seam: hand the static packing's kinematics across (once).
 fn export_kinematics(world: Multi) {
     let atoms = world.expect_read::<Atom>("soil");
-    let n = atoms.nlocal as usize;
+    let n = atoms.nlocal() as usize;
     let mut set = world.expect_write::<ParticleSet>("cfd");
     if set.particles.len() == n {
         return; // static packing — export once
