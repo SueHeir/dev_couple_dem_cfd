@@ -3,8 +3,7 @@
 //! FIELD supplies partition ownership, SOIL supplies particle state and DEM
 //! ownership, and this module turns those facts into opaque GRASS routes.
 
-use field_core::PartitionDirectory;
-use grass_multi::{EntityId, ReceivedPayload, RoutedPayload};
+use grass_multi::{EntityId, OwnerMap, ReceivedPayload, RoutedPayload};
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -46,8 +45,11 @@ pub struct RoutedForce {
 }
 
 /// Build containing-partition routes for particle kinematics.
+///
+/// `directory` is the receiving code's address book: FIELD's
+/// `PartitionDirectory`, a p4est forest, or any other [`OwnerMap`].
 pub fn route_particles(
-    directory: &PartitionDirectory,
+    directory: &dyn OwnerMap,
     particles: &[RoutedParticle],
 ) -> Result<Vec<RoutedPayload>, ParticleRoutingError> {
     particles
@@ -258,7 +260,7 @@ impl std::error::Error for ParticleRoutingError {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use field_core::{UniformMeshConfig, Vec3};
+    use field_core::{PartitionDirectory, UniformMeshConfig, Vec3};
 
     fn directory() -> PartitionDirectory {
         PartitionDirectory::from_uniform_config(
@@ -340,4 +342,23 @@ mod tests {
 
     #[allow(dead_code)]
     fn _vec3_type_is_shared(_: Vec3) {}
+
+    #[test]
+    fn routes_by_any_owner_map_including_soils_balanced_cuts() {
+        // A load-balanced SOIL partition is just another address book: the
+        // same routing code sends particles to its uneven slabs.
+        let soil = soil_core::ParticlePartitionDirectory::with_planes(
+            [0.0; 3],
+            [1.0; 3],
+            [vec![0.0, 0.15, 0.3, 1.0], vec![0.0, 1.0], vec![0.0, 1.0]],
+        )
+        .unwrap();
+        let routes = route_particles(
+            &soil,
+            &[particle(1, 0, 0.1), particle(2, 0, 0.2), particle(3, 0, 0.5)],
+        )
+        .unwrap();
+        let destinations: Vec<i32> = routes.iter().map(|r| r.destination).collect();
+        assert_eq!(destinations, vec![0, 1, 2]);
+    }
 }
